@@ -1,0 +1,5 @@
+fastapi
+pandas
+uvicorn
+python-dotenv
+pydantic-settings
