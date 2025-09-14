@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from data_source import DataSource
 import pandas as pd
 from config import config
+from typing import Optional
 
 DATA_FEED_BASE_URL = config.DATA_FEED_BASE_URL
 CALLBACK_BASE_URL = config.CALLBACK_BASE_URL
@@ -14,8 +15,8 @@ class LocalTickerDataSource(DataSource):
         self, 
         ticker: str, 
         interval: str, 
-        start_datetime: datetime, 
-        callback_url: str|None = None
+        start_datetime: Optional[datetime] = None, 
+        callback_url: Optional[str] = None
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV data from the external data feed service.
@@ -26,7 +27,7 @@ class LocalTickerDataSource(DataSource):
         params = {
             "ticker": ticker,
             "interval": interval,
-            "start": start_datetime.isoformat(),
+            "start": start_datetime.isoformat() if start_datetime else None,
             "end": datetime.now(timezone.utc).isoformat(),
         }
         if callback_url:

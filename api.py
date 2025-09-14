@@ -1,21 +1,9 @@
 from fastapi import FastAPI, HTTPException, Query
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Tuple
 
-from strategy_base import (
-    get_strategy_class,
-    list_strategy_classes,
-    add_strategy_instance,
-    get_strategy_instance,
-    list_strategy_instances,
-    autodiscover_strategies,
-    reload_all_instances
-)
-from schema.strategy_schema import (
-    StrategyCreateRequest,
-    CandleRequest,
-    SignalResponse
-)
+import strategy_base
+import schema.strategy_schema as strategy_schema
 
 import logging
 
@@ -29,8 +17,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    autodiscover_strategies()
-    reload_all_instances()
+    strategy_base.autodiscover_strategies()
+    strategy_base.reload_all_instances()
     yield
     # Shutdown (optional cleanup)
     # e.g., close DB connections, stop background workers
@@ -39,100 +27,147 @@ app = FastAPI(title="Strategy API", lifespan=lifespan)
 
 
 @app.post("/strategies")
-def create_strategy(req: StrategyCreateRequest):
-    cls = get_strategy_class(req.strategy)
+def create_strategy(req: strategy_schema.CreateStrategyRequest):
+    cls = strategy_base.get_strategy_class(req.strategy_name)
     if not cls:
         raise HTTPException(
-            status_code=400, detail=f"Unknown strategy Type {req.strategy}")
+            status_code=400, detail=f"Unknown strategy Type {req.strategy_name}"
+        )
 
-    key = (req.strategy, req.ticker, req.interval)
+    # Instantiate with params
+    instance = cls(params=req.params)
 
-    if get_strategy_instance(key) and not req.restart:
-        raise HTTPException(
-            status_code=400, detail="Strategy instance already exists")
+    # Register all (ticker, interval) pairs
+    for ticker, intervals in req.tickers.items():
+        for interval in intervals:
+            instance.ensure_ticker(ticker, interval)
+            # initialize ticker-specific data instead of whole strategy
+            instance.initialize_ticker(ticker, interval, req.params)
 
-    instance = cls(req.ticker, req.interval, req.params)
-    if not req.restart or not instance.load_from_disk():
-        instance.initialize()
-        instance.save_to_disk()
+    # Save instance to registry
+    strategy_base.add_strategy_instance(
+        strategy_name=req.strategy_name,
+        params=req.params,
+        instance=instance
+    )
 
-    add_strategy_instance(key, instance)
-    return {"message": f"Strategy {req.strategy} created for {req.ticker} {req.interval}"}
+    return {
+        "message": "Strategy created",
+        "strategy": req.strategy_name,
+        "params": req.params,
+        "tickers": req.tickers,
+    }
+
+
+@app.get("/strategies/available", response_model=List[str])
+def list_available_strategies():
+    return {"available_strategies": strategy_base.list_strategy_classes()}
+
+
+@app.get("/strategies/instances", response_model=List[Tuple[str, str]])
+def list_strategy_instances():
+    return {"active_strategies": strategy_base.list_strategy_instances()}
 
 
 @app.post(
-    "/strategies/{strategy_name}/{ticker}/{interval}/candle",
-    response_model=SignalResponse
+    "/strategies/{ticker}/{interval}/candle",
+    response_model=List[strategy_schema.SignalResponse]
 )
-def feed_candle(strategy_name: str, ticker: str, interval: str, candle: CandleRequest):
-    key = (strategy_name, ticker, interval)
-    instance = get_strategy_instance(key)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Strategy not found")
+def feed_candle(
+    ticker: str,
+    interval: str,
+    candle: strategy_schema.CandleRequest
+):
+    """
+    Feed a new candle to all strategies that have this ticker+interval.
+    """
+    instances = strategy_base.get_strategy_instances_by_ticker_interval(
+        ticker, interval)
+    if not instances:
+        raise HTTPException(
+            status_code=404, detail="No strategy instance found for this ticker/interval")
 
-    # Feed new candle and auto-save
-    instance.on_new_candle(candle.model_dump())
+    responses = []
+    for instance in instances:
+        instance.on_new_candle(
+            ticker=ticker, interval=interval, ohlc=candle.model_dump())
+        responses.append(
+            instance.get_last_signal(ticker=ticker, interval=interval)
+        )
 
-    # Return the latest summarized signal
-    return instance.get_last_signal()
-
-
-@app.get("/strategies")
-def list_strategies():
-    return {"active_strategies": list_strategy_instances()}
-
-
-@app.get("/strategies/available")
-def list_available_strategies():
-    return {"available_strategies": list_strategy_classes()}
+    # Optionally return the last signal of the first instance
+    return responses
 
 
 @app.get(
-    "/strategies/{strategy_name}/{ticker}/{interval}/last-signal",
-    response_model=SignalResponse
+    "/strategies/{strategy_id}/{ticker}/{interval}/last-signal",
+    response_model=strategy_schema.SignalResponse
 )
-def get_last_signal(strategy_name: str, ticker: str, interval: str):
-    key = (strategy_name, ticker, interval)
-    instance = get_strategy_instance(key)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Strategy not found")
+def get_last_signal(strategy_id: str, ticker: str, interval: str):
+    inst = strategy_base.get_strategy_instance_by_id(strategy_id)
+    if not inst:
+        raise HTTPException(
+            status_code=404, detail="Strategy instance not found")
+    return inst.get_last_signal(ticker, interval)
 
-    return instance.get_last_signal()
 
-
-@app.get("/strategies/{strategy_name}/{ticker}/{interval}/signals", response_model=List[SignalResponse])
+@app.get(
+    "/strategies/{strategy_name}/{ticker}/{interval}/signals",
+    response_model=List[strategy_schema.SignalResponse]
+)
 def get_all_signals(
-    strategy_name: str,
+    strategy_id: str,
     ticker: str,
     interval: str,
     offset: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=1000,
                        description="Number of records to return"),
 ):
-    key = (strategy_name, ticker, interval)
-    instance = get_strategy_instance(key)
-    if not instance:
+    inst = strategy_base.get_strategy_instance_by_id(strategy_id)
+    if not inst:
+        raise HTTPException(
+            status_code=404, detail="Strategy instance not found")
+    return inst.get_all_signals(ticker, interval, offset=offset, limit=limit)
+
+
+@app.delete("/strategies/{strategy_name}")
+def delete_strategy_instance(strategy_name: str):
+    """
+    Delete the full strategy instance and all its tickers/intervals.
+    """
+    instances = strategy_base.get_strategy_instances_by_name(strategy_name)
+    if not instances:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    logger.info(f"Found Instance of {instance.strategy_name}")
-    if instance.signals is None or instance.signals.empty:
-        return []
 
-    return instance.get_all_signals(limit=limit, offset=offset)
+    for instance in instances:
+        instance.delete_from_disk()  # deletes all tickers + meta
+        strategy_base.remove_strategy_instance(
+            instance)  # remove from registry
+
+    return {"message": f"All instances of {strategy_name} deleted"}
 
 
-@app.delete("/strategies/{strategy}/{ticker}/{interval}")
-def delete_strategy(strategy: str, ticker: str, interval: str):
-    key = (strategy, ticker, interval)
-    instance = get_strategy_instance(key)
+@app.delete("/strategies/{strategy_name}/{ticker}/{interval}")
+def delete_strategy_ticker(strategy_name: str, ticker: str, interval: str):
+    """
+    Delete only the specified ticker/interval for a strategy instance.
+    """
+    instances = strategy_base.get_strategy_instances_by_name(strategy_name)
+    if not instances:
+        raise HTTPException(status_code=404, detail="Strategy not found")
 
-    if not instance:
-        raise HTTPException(status_code=404, detail="Strategy instance not found")
+    deleted = False
+    for instance in instances:
+        if (ticker, interval) in instance._signals:
+            instance.remove_ticker(ticker, interval)
+            deleted = True
 
-    # Delete from disk
-    instance.delete_from_disk()
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active ticker {ticker} with interval {interval} found"
+        )
 
-    # Remove from memory
-    if key in _STRATEGY_INSTANCES:
-        del _STRATEGY_INSTANCES[key]
-
-    return {"message": f"✅ Strategy {strategy} {ticker} {interval} deleted successfully"}
+    return {
+        "message": f"Ticker {ticker} with interval {interval} removed from {strategy_name}"
+    }

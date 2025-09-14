@@ -1,15 +1,16 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
 import pandas as pd
+from typing import Optional
 
 
 class DataSource(ABC):
     @abstractmethod
     def fetch_data(
-        self, ticker: str, 
-        interval: str, 
-        start_datetime: datetime, 
-        callback_url: str|None = None
+        self, ticker: str,
+        interval: str,
+        start_datetime: Optional[datetime] = None,
+        callback_url: Optional[str] = None
     ) -> pd.DataFrame:
         """
         Fetch OHLC dataframe for given ticker/interval

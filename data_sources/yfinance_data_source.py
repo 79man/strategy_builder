@@ -3,15 +3,16 @@ import requests
 from datetime import datetime, timezone
 from data_source import DataSource
 import pandas as pd
+from typing import Optional
 
 
 class YFinanceSource(DataSource):
     def fetch_data(
-        self, 
-        ticker: str, 
-        interval: str, 
-        start_datetime: datetime, 
-        callback_url: str|None = None
+        self,
+        ticker: str,
+        interval: str,
+        start_datetime: Optional[datetime] = None,
+        callback_url: Optional[str] = None
     ) -> pd.DataFrame:
         # does not support subscription
 
@@ -21,5 +22,4 @@ class YFinanceSource(DataSource):
             start=start_datetime,
             end=datetime.now(timezone.utc)
         )
-        return df[['Open', 'High', 'Low', 'Close']].dropna()
-
+        return df[['Open', 'High', 'Low', 'Close']].dropna() if df is not None else pd.DataFrame()
