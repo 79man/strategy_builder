@@ -403,9 +403,12 @@ class Strategy(ABC):
         ticker: str, interval: str,
         ohlc_df: pd.DataFrame
     ):
-        result = self._on_new_candle(ticker, interval, ohlc)
-        self.save_to_disk(ticker, interval)
-        return result
+        # TODO: ingest multiple candles at once in an efficient manner        
+
+        pass
+        # result = self._on_new_candle(ticker, interval, ohlc)
+        # self.save_to_disk(ticker, interval)
+        # return result
 
     # --- persistence helpers (per ticker/interval) ---
 

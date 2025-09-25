@@ -81,17 +81,225 @@ python run.py
 
 ## API Endpoints
 
-- `POST   /strategies` — Create/instantiate a new strategy
-- `GET    /strategies/available` — List available strategy types
-- `GET    /strategies/instances` — List all live strategy instances
-- `POST   /strategies/{ticker}/{interval}/candle` — Feed a new OHLC candle to one or more strategies
-- `GET    /strategies/{strategy_id}/{ticker}/{interval}/last-signal` — Fetch the last computed signal for a given ticker/interval
-- `GET    /strategies/{strategy_id}/{ticker}/{interval}/signals` — Paginated signal history
-- `DELETE /strategies/{strategy_id}` — Remove a strategy instance
-- `DELETE /strategies/{strategy_id}/{ticker}/{interval}` — Remove a specific ticker/interval from an instance
-- `PUT    /strategies/{strategy_id}/restart` — Restart a strategy instance and rehydrate state
+### Create Strategy Instance
 
-All requests use JSON payloads, and all responses are JSON.
+```
+POST /strategies
+```
+
+Create a new strategy instance.
+
+**Example Request Body:**
+```json
+{
+  "strategy_name": "MACDStrategy",
+  "params": { "macd_fast": 12, "macd_slow": 26 },
+  "tickers": { "NIFTY": ["15m", "1h"] }
+}
+```
+
+**Example Response:**
+
+```json
+{
+  "message": "Strategy created",
+  "strategy_name": "MACDStrategy",
+  "strategy_id": "MACDStrategy:643212",
+  "params": { "macd_fast": 12, "macd_slow": 26 },
+  "tickers": { "NIFTY": ["15m", "1h"] }
+}
+```
+
+
+***
+
+### List Available Strategy Classes
+
+```
+GET /strategies/available
+```
+
+Returns a list of available strategy names.
+
+**Example Response:**
+
+```json
+{
+  "available_strategies": ["MACDStrategy", "ATRTrendFollower"]
+}
+```
+
+
+***
+
+### List Active Strategy Instances
+```
+GET /strategies/instances
+```
+
+List all currently active strategy instances.
+
+**Example Response:**
+
+```json
+{
+  "active_strategies": [
+    {
+      "strategy_id": "MACDStrategy:643212",
+      "strategy_name": "MACDStrategy",
+      "params": { "macd_fast": 12, "macd_slow": 26 },
+      "tickers": { "NIFTY": ["15m", "1h"] }
+    }
+  ]
+}
+```
+
+
+***
+
+### Feed Candle Data to Strategies
+
+```
+POST /strategies/{ticker}/{interval}/candle
+```
+**Example Request Body:**
+
+```json
+{
+  "datetime": "2025-09-18T10:15:00Z",
+  "open": 22000.50,
+  "high": 22040.75,
+  "low": 21988.25,
+  "close": 22031.40
+}
+```
+
+**Example Response:**
+
+```json
+[
+  {
+    "ticker": "NIFTY",
+    "interval": "15m",
+    "strategy_id": "MACDStrategy:643212",
+    "datetime": "2025-09-18T10:15:00Z",
+    "signal": "BUY",
+    "indicators": { "macd": 2.45, "signal_above_macd": true },
+    "message": "MACD crossed above signal line"
+  }
+]
+```
+
+
+***
+
+### Get Last Signal for a Strategy
+
+```
+GET /strategies/{strategy_id}/{ticker}/{interval}/last-signal
+```
+
+**Example Response:**
+
+```json
+{
+  "ticker": "NIFTY",
+  "interval": "15m",
+  "strategy_id": "MACDStrategy:643212",
+  "datetime": "2025-09-18T10:15:00Z",
+  "signal": "BUY",
+  "indicators": { "macd": 2.45, "signal_above_macd": true },
+  "message": "MACD crossed above signal line"
+}
+```
+
+
+***
+
+### Get All Signals (Paginated)
+
+```
+GET /strategies/{strategy_id}/{ticker}/{interval}/signals?offset=0&limit=2
+```
+
+**Example Response:**
+
+```json
+[
+  {
+    "ticker": "NIFTY",
+    "interval": "15m",
+    "strategy_id": "MACDStrategy:643212",
+    "datetime": "2025-09-18T10:15:00Z",
+    "signal": "BUY",
+    "indicators": { "macd": 2.45, "signal_above_macd": true },
+    "message": "MACD crossed above signal line"
+  },
+  {
+    "ticker": "NIFTY",
+    "interval": "15m",
+    "strategy_id": "MACDStrategy:643212",
+    "datetime": "2025-09-18T10:00:00Z",
+    "signal": "SELL",
+    "indicators": { "macd": -1.13, "signal_above_macd": false }
+  }
+]
+```
+
+
+***
+
+### Delete Full Strategy Instance
+
+```
+DELETE /strategies/{strategy_id}
+```
+
+**Example Response:**
+
+```json
+{ "message": "Strategy MACDStrategy:643212 deleted" }
+```
+
+
+***
+
+### Remove Ticker/Interval from Strategy
+
+```
+DELETE /strategies/{strategy_id}/{ticker}/{interval}
+```
+
+**Example Response:**
+
+```json
+{
+  "message": "Ticker NIFTY with interval 15m removed from MACDStrategy:643212"
+}
+```
+
+
+***
+
+### Restart, Pause, Resume Strategy Instance
+
+```
+PUT /strategies/{strategy_id}/restart
+PUT /strategies/{strategy_id}/pause
+PUT /strategies/{strategy_id}/resume
+```
+
+**Example Response:**
+
+```json
+{
+  "message": "Strategy restarted",
+  "strategy_id": "MACDStrategy:643212",
+  "status": "running"
+}
+```
+
+**All requests use JSON payloads, and all responses are JSON.**
 
 ***
 

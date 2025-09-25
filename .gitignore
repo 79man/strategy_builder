@@ -1,0 +1,6 @@
+__pycache__/*
+schema/__pycache__/*
+strategy_data/*
+data_sources/__pycache__/*
+strategies/__pycache__/*
+utils/__pycache__/*
