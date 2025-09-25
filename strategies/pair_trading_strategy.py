@@ -75,14 +75,12 @@ class PairTradingStrategy(Strategy):
         if df.empty:
             raise ValueError(f"No data returned for {ticker} {interval}")
 
-        df.index.name = "datetime"
-
         # Spread & signal flags
         df["Spread"] = pd.Series(dtype="float")
         df["GoLong"] = False
         df["GoShort"] = False
 
-        self._signals[(ticker, interval)] = df
+        self._tickers[(ticker, interval)] = df
         self.save_to_disk(ticker, interval)
 
     def _on_new_candle(self, ticker: str, interval: str, ohlc: dict) -> dict:
@@ -90,7 +88,7 @@ class PairTradingStrategy(Strategy):
         Ingest a new candle for one ticker.
         Signals are computed only when BOTH tickers have aligned timestamps.
         """
-        df = self._signals.get((ticker, interval))
+        df = self._tickers.get((ticker, interval))
         if df is None:
             return {"error": f"{ticker}-{interval} not initialized"}
 
@@ -116,12 +114,12 @@ class PairTradingStrategy(Strategy):
             "GoLong": False,
             "GoShort": False
         }
-        self._signals[(ticker, interval)] = df
+        self._tickers[(ticker, interval)] = df
 
         # logger.info(f"df: {helpers.get_df_info(df)}")
 
         # Identify the other ticker (2-ticker pair)
-        tickers = {t for (t, i) in self._signals if i == interval}
+        tickers = {t for (t, i) in self._tickers if i == interval}
         if len(tickers) != 2:
             return {"warning": "Pair not complete yet"}
 
@@ -130,7 +128,7 @@ class PairTradingStrategy(Strategy):
             return {"error": "Could not identify pair ticker"}
 
         other = next(iter(other_tickers))  # Safe extraction
-        df_other = self._signals.get((other, interval))
+        df_other = self._tickers.get((other, interval))
 
         if df_other is None or df_other.empty:
             return {"error": f"Other ticker {other} not found or empty"}
@@ -172,15 +170,15 @@ class PairTradingStrategy(Strategy):
         go_short = spread > threshold
 
         # Update both frames safely
-        self._signals[(ticker, interval)].at[ts, "Spread"] = spread
-        self._signals[(ticker, interval)].at[ts, "GoLong"] = go_long
-        self._signals[(ticker, interval)].at[ts, "GoShort"] = go_short
+        self._tickers[(ticker, interval)].at[ts, "Spread"] = spread
+        self._tickers[(ticker, interval)].at[ts, "GoLong"] = go_long
+        self._tickers[(ticker, interval)].at[ts, "GoShort"] = go_short
 
         # Update other ticker's frame if timestamp exists
-        if ts in self._signals[(other, interval)].index:
-            self._signals[(other, interval)].at[ts, "Spread"] = spread
-            self._signals[(other, interval)].at[ts, "GoLong"] = go_long
-            self._signals[(other, interval)].at[ts, "GoShort"] = go_short
+        if ts in self._tickers[(other, interval)].index:
+            self._tickers[(other, interval)].at[ts, "Spread"] = spread
+            self._tickers[(other, interval)].at[ts, "GoLong"] = go_long
+            self._tickers[(other, interval)].at[ts, "GoShort"] = go_short
 
         return {
             "datetime": str(ts),

@@ -262,7 +262,7 @@ def delete_strategy_ticker(strategy_id: str, ticker: str, interval: str):
 
 @app.put("/strategies/{strategy_id}/restart")
 def restart_strategy_instance(strategy_id: str):
-    logger.info(f"Received strategy_id: '{strategy_id}'") 
+    logger.info(f"Received strategy_id: '{strategy_id}'")
     """
     Delete the full strategy instance and all its tickers/intervals.
     """
@@ -278,16 +278,130 @@ def restart_strategy_instance(strategy_id: str):
             status_code=404, detail="Strategy Instance not found")
 
     try:
-        if hasattr(instance, 'rehydrate'):
-            instance.rehydrate(None)
-        # strategy_base.remove_strategy_instance(instance)
-        return {
-            "message": f"Strategy {strategy_id} restarted",
-            "strategy_id": instance.strategy_id,
-            "status": instance.get_status()
-        }
-    
+        success, message = instance.restart()
+        if success:
+            return {
+                "message": message,
+                "strategy_id": strategy_id,
+                "status": instance.get_status()
+            }
+        else:
+            raise HTTPException(
+                status_code=403, detail=message
+            )
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Error in rehydrating: {e}")
         raise HTTPException(
             status_code=500, detail=f"Error in rehydrating: {e}")
+
+
+@app.put(
+    "/strategies/pause",
+    response_model=strategy_schema.StrategiesPauseResponse
+)
+def pause_strategy_instances(req: strategy_schema.StrategiesPauseRequest):
+    """
+    Resume the strategy instance
+    """
+    if not reload_complete:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Reloading in progress. Please try after sometime"
+        )
+
+    response = []
+    strategy_ids_to_pause = req.strategy_ids or []
+    if not strategy_ids_to_pause:
+        return {
+            'message': "No Strategy Ids specified"
+        }
+
+    for strategy_id in strategy_ids_to_pause:
+        instance = strategy_base.get_strategy_instance_by_id(strategy_id)
+        if not instance:
+            # raise HTTPException(
+            #     status_code=404, detail="Strategy Instance not found")
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status="Strategy Instance not found"
+                )
+            )
+            continue
+
+        try:
+            success, message = instance.pause()
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=instance.get_status() if success else message
+                )
+            )
+        except Exception as e:
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=f"{e}"
+                )
+            )
+    return {
+        'message': "Success",
+        'detail': response
+    }
+
+
+@app.put(
+    "/strategies/resume",
+    response_model=strategy_schema.StrategiesResumeResponse
+)
+def resume_strategy_instances(req: strategy_schema.StrategiesResumeRequest):
+    """
+    Resume the strategy instance
+    """
+    if not reload_complete:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Reloading in progress. Please try after sometime"
+        )
+
+    response = []
+    strategy_ids_to_resume = req.strategy_ids or []
+    if not strategy_ids_to_resume:
+        return {
+            'message': "No Strategy Ids specified"
+        }
+
+    for strategy_id in strategy_ids_to_resume:
+        instance = strategy_base.get_strategy_instance_by_id(strategy_id)
+        if not instance:
+            # raise HTTPException(
+            #     status_code=404, detail="Strategy Instance not found")
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status="Strategy Instance not found"
+                )
+            )
+            continue
+
+        try:
+            success, message = instance.resume()
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=instance.get_status() if success else message
+                )
+            )
+        except Exception as e:
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=f"{e}"
+                )
+            )
+    return {
+        'message': "Success",
+        'detail': response
+    }

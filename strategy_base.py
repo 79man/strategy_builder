@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import pandas as pd
 import os
 import json
+import re
 from datetime import datetime, timezone
 from typing import Dict, Tuple, Optional, List, Any, Union
 
@@ -13,7 +14,7 @@ import hashlib
 from utils.intervals import validate_interval, get_interval_timedelta
 from utils.callback_url import get_callback_url
 from data_source import DataSourceError
-
+from utils import helpers
 import logging
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ def add_strategy_instance(
     _STRATEGY_INSTANCES[key] = instance
 
     # update reverse lookup
-    for ticker, interval in instance._signals.keys():
+    for ticker, interval in instance._tickers.keys():
         _TICKER_INTERVAL_MAP.setdefault(
             (ticker, interval), []).append(instance)
 
@@ -124,7 +125,7 @@ def remove_strategy_instance(instance: "Strategy"):
         del _STRATEGY_INSTANCES[key]
 
     # remove from ticker/interval map
-    for key in instance._signals.keys():
+    for key in instance._tickers.keys():
         if key in _TICKER_INTERVAL_MAP:
             _TICKER_INTERVAL_MAP[key].remove(instance)
             if not _TICKER_INTERVAL_MAP[key]:
@@ -139,7 +140,11 @@ def get_strategy_instance_by_key(
 
 
 def get_strategy_instance_by_id(strategy_id: str) -> Optional["Strategy"]:
-    name, ph = parse_strategy_id(strategy_id)
+    try:
+        name, ph = parse_strategy_id(strategy_id)
+    except Exception as e:
+        logger.warning(f"get_strategy_instance_by_id() failed: {e}")
+        return None
     return get_strategy_instance_by_key(name, ph)
 
 
@@ -199,21 +204,38 @@ class Strategy(ABC):
         storage_path: Optional[str] = None
     ):
         self.params: dict = params or {}
+        self.request_params: dict = self.params.copy()
+
         self.storage_path: Path = Path(
-            storage_path) if storage_path else Path(STORAGE_PATH)
+            storage_path
+        ) if storage_path else Path(STORAGE_PATH)
+
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
         # internal maps keyed by (ticker, interval)
-        self._signals: Dict[Tuple[str, str], pd.DataFrame] = {}
+        self._tickers: Dict[Tuple[str, str], pd.DataFrame] = {}
+        self._signals: pd.DataFrame = pd.DataFrame()
 
         # precompute params hash
-        self.params_hash: str = make_params_hash(self.params)
+        # self.params_hash: str = make_params_hash(self.params)
         self.data_source = None  # To be updated by the concrete Strategy
 
         self.running: bool = False
 
+        # Add pause state
+        self._is_paused: bool = False
+
     def get_status(self) -> str:
-        return "RUNNING" if self.running else "STOPPED"
+        if self._is_paused:
+            return "PAUSED"
+        elif self.running:
+            return "RUNNING"
+        else:
+            return "STOPPED"
+
+    def set_paused(self, paused: bool):
+        """Set the paused state of this strategy instance"""
+        self._is_paused = paused
 
     @classmethod
     def validate_creation_request(cls, tickers: Dict[str, List[str]], params: Optional[dict] = None) -> None:
@@ -260,14 +282,6 @@ class Strategy(ABC):
 
             strategy_class_name = meta.get("strategy_class")
             params = meta.get("params", {})
-            tickers_map = meta.get("tickers", {})
-            last_update_str = meta.get("last_update")
-
-            # Parse last update timestamp
-            last_update = None
-            if last_update_str:
-                last_update = datetime.fromisoformat(
-                    last_update_str.replace('Z', '+00:00'))
 
             # Get the actual strategy class
             strategy_cls = get_strategy_class(strategy_class_name)
@@ -276,43 +290,26 @@ class Strategy(ABC):
                     f"⚠️ Unknown strategy class {strategy_class_name} in {meta_path.name}")
                 return None
 
+            is_paused = meta.get("is_paused", False)
+
             # Create instance
             instance = strategy_cls(
-                params=params, storage_path=str(storage_path))
+                params=params,
+                storage_path=str(storage_path)
+            )
 
-            # Load data for all tickers+intervals
-            loaded_any = False
-            for ticker, intervals in tickers_map.items():
-                for interval in intervals:
-                    try:
-                        # Load CSV data directly into _signals
-                        base = instance.base_filename(ticker, interval)
-                        csv_path = storage_path / f"{base}_signals.csv"
+            # Set pause status
+            if hasattr(instance, 'set_paused'):
+                instance.set_paused(is_paused)
 
-                        if csv_path.exists():
-                            df = pd.read_csv(
-                                csv_path, index_col=0, parse_dates=True)
-                            
-                            df.index = pd.to_datetime(df.index, utc=True, format="mixed")
-                            
-                            # if not hasattr(df.index, 'tz') and df.index.tz is None:
-                            #     df.index = df.index.tz_localize('UTC')
+            # Skip loading data if paused
+            if is_paused:
+                logger.info(
+                    f"Strategy {instance.strategy_id} is paused, skipping data load from disk")
+                return instance  # Mark as loaded so it gets registered
 
-                            instance._signals[(ticker, interval)] = df
-                            loaded_any = True
-                            logger.info(
-                                f"Loaded signals for {ticker}/{interval}: {df.shape}, {df.index.dtype}, {df.index.shape}")
-                        else:
-                            logger.warning(f"Missing signals file: {csv_path}")
-
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to load {ticker}/{interval} for {strategy_class_name}: {e}")
-
-            if loaded_any:
-                # Call rehydrate if it exists
-                if hasattr(instance, 'rehydrate'):
-                    instance.rehydrate()
+            # Delegate loading to instance method
+            if instance.load_from_disk():
                 return instance
             else:
                 logger.warning(
@@ -324,12 +321,22 @@ class Strategy(ABC):
             return None
 
     @property
+    def params_hash(self) -> str:
+        """Dynamically computes the hash from the current params."""
+        return make_params_hash(self.params)
+
+    @property
     def name(self) -> str:
         return getattr(self.__class__, "strategy_name", self.__class__.__name__)
 
     @property
     def strategy_id(self) -> str:
         return strategy_id_from_parts(self.name, self.params_hash)
+
+    @property
+    def disk_safe_strategy_id(self) -> str:
+        # Replace anything not safe for filenames (not alphanumeric or dash/underscore) with underscore
+        return re.sub(r'[^A-Za-z0-9_\-]', '_', self.strategy_id)
 
     # -----------------------------------
     # Abstract methods
@@ -351,12 +358,12 @@ class Strategy(ABC):
     def _on_new_candle(self, ticker: str, interval: str, ohlc: dict) -> dict:
         """
         Child-specific handling for a single new candle.
-        Should update self._dfs[(ticker,interval)] and self._signals[(ticker,interval)]
+        Should update self._dfs[(ticker,interval)] and self._tickers[(ticker,interval)]
         and return a dict (e.g. indicators or raw row).
         """
         pass
 
-    # --- public API for multi-ticker behavior ---
+        # --- public API for multi-ticker behavior ---
     def ensure_ticker(self, ticker: str, interval: str):
         """Ensure ticker/interval is registered and validated"""
         if not ticker or not isinstance(ticker, str):
@@ -368,8 +375,8 @@ class Strategy(ABC):
         validate_interval(interval=interval)
 
         key = (ticker, interval)
-        if key not in self._signals:
-            self._signals[key] = pd.DataFrame(
+        if key not in self._tickers:
+            self._tickers[key] = pd.DataFrame(
                 columns=["Open", "High", "Low", "Close"])
             self.save_to_disk(ticker, interval)
 
@@ -380,21 +387,32 @@ class Strategy(ABC):
     # Candle ingestion wrapper
     # -----------------------------------
 
-    def on_new_candle(self, ticker: str, interval: str, ohlc: dict) -> dict:
+    def on_new_candle(
+        self, ticker: str, interval: str, ohlc: dict
+    ) -> dict:
+        if self._is_paused:
+            logger.error(f"Strategy {self.strategy_id} is Paused.")
+            return {'error': f"Strategy {self.strategy_id} is Paused."}
+
         result = self._on_new_candle(ticker, interval, ohlc)
         self.save_to_disk(ticker, interval)
         return result
 
-        # --- persistence helpers (per ticker/interval) ---
-    def base_filename(self, ticker: str, interval: str) -> str:
-        # include params_hash in filename so different instances don't clash
-        return f"{self.name}_{self.params_hash}_{ticker}_{interval}"
+    def _update_candles(
+        self,
+        ticker: str, interval: str,
+        ohlc_df: pd.DataFrame
+    ):
+        result = self._on_new_candle(ticker, interval, ohlc)
+        self.save_to_disk(ticker, interval)
+        return result
 
-    def meta_filename(self) -> str:
-        return f"{self.name}_{self.params_hash}_meta.json"
+    # --- persistence helpers (per ticker/interval) ---
 
     def load_metadata(self) -> dict:
-        meta_path = os.path.join(self.storage_path, self.meta_filename())
+        strat_dir = Path(self.storage_path) / self.disk_safe_strategy_id
+        meta_path = strat_dir / "meta.json"
+
         with open(meta_path, "r") as f:
             meta = json.load(f)
 
@@ -420,6 +438,121 @@ class Strategy(ABC):
 
         return {}
 
+    def pause(self) -> Tuple[bool, str]:
+
+        if not self.running:
+            return False, f"Strategy {self.strategy_id} is not running"
+        if self._is_paused:
+            return False, f"Strategy {self.strategy_id} is already paused"
+
+        self._is_paused = True
+        self.save_to_disk()
+
+        return True, f"Pause Operation Successful"
+
+    def resume(self) -> Tuple[bool, str]:
+        if not self._is_paused:
+            msg = f"Not allowed to resume strategy {self.strategy_id}, as it is not Paused"
+            logger.error(msg)
+            return False, msg
+
+        # Check if data needs to be reloaded (empty signals indicate app restart scenario)
+        if not self._tickers or all(df.empty for df in self._tickers.values()):
+            # Reload data from disk first
+            if not self.load_from_disk():
+                return False, f"Failed to load Strategy Data from Disk for {self.strategy_id}"
+        else:
+            # disk loading was done previosuly
+            if not self.rehydrate():
+                return False, f"Failed to rehydrate Strategy Data from Data Source for {self.strategy_id}"
+
+        self._is_paused = False
+        self.save_to_disk()
+        return True, f"Resume Operation Successful"
+
+    def restart(self) -> Tuple[bool, str]:
+        """  
+        Restart strategy by clearing all signals data and deleting from disk.  
+        Unlike resume, this removes all existing data both in memory and on disk.  
+        """
+        try:
+            keys = list(self._tickers.keys())
+
+            # Delete all ticker data from disk
+            for ticker, interval in keys:
+                self.remove_ticker(ticker, interval)
+
+            for ticker, interval in keys:
+                self.ensure_ticker(ticker, interval)
+                self.initialize_ticker(ticker, interval, self.params)
+
+            # Ensure strategy is not paused after restart
+            self._is_paused = False
+            self.save_to_disk()
+
+            return True, f"Restart Operation Successful"
+
+        except Exception as e:
+            logger.error(f"Failed to restart strategy {self.strategy_id}: {e}")
+            return False, f"Failed to restart strategy: {str(e)}"
+
+    # Save given ticker+interval (or all, if not specified)
+    def _save_ticker_df(self, strat_dir: Path, ticker: str, interval: str):
+        df = self._tickers.get((ticker, interval))
+        csv_path = strat_dir / f"{ticker}_{interval}.csv"
+
+        if df is not None:
+            logger.info(f"Saving: {ticker}/{interval}: {df.shape}")
+            if not df.empty:
+                df.to_csv(csv_path, index=True)
+            else:
+                pd.DataFrame(columns=["Open", "High", "Low", "Close"]).to_csv(
+                    csv_path, index=True)
+        else:
+            logger.info(f"No data to save for {ticker}/{interval}")
+
+    def delete_from_disk(
+        self,
+        ticker: Optional[str] = None,
+        interval: Optional[str] = None
+    ):
+        """
+        Delete persisted files for either:
+        - specific ticker+interval if provided
+        - ALL tickers for this strategy instance if ticker/interval is None
+        """
+        strat_dir = Path(self.storage_path) / self.disk_safe_strategy_id
+        if ticker and interval:
+            # delete just this one
+
+            csv_path = strat_dir / f"{ticker}_{interval}.csv"
+            try:
+                os.remove(csv_path)
+            except FileNotFoundError as e:
+                logger.warning(f"Failed to delete file {csv_path}: {e}")
+        else:
+            for (tk, iv), _ in self._tickers.items():
+                csv_path = strat_dir / f"{tk}_{iv}.csv"
+                try:
+                    os.remove(csv_path)
+                except FileNotFoundError as e:
+                    logger.warning(f"Failed to delete file {csv_path}: {e}")
+
+        # always refresh meta file if there are still tickers left
+        if ticker and interval:
+            if (ticker, interval) in self._tickers:
+                del self._tickers[(ticker, interval)]
+            if self._tickers:
+                self.save_to_disk()  # rewrite meta with remaining tickers
+            else:
+                # if no signals left, nuke meta file
+                meta_path = strat_dir / "meta.json"
+                try:
+                    os.remove(meta_path)
+                except FileNotFoundError as e:
+                    logger.warning(f"Failed to delete file {meta_path}: {e}")
+                    pass
+
     def save_to_disk(
         self,
         ticker: Optional[str] = None,
@@ -427,61 +560,57 @@ class Strategy(ABC):
     ):
         """Save strategy state to disk with improved error handling"""
         try:
+            # Create per-strategy subdir
+            strat_dir = Path(self.storage_path) / self.disk_safe_strategy_id
+            strat_dir.mkdir(parents=True, exist_ok=True)
+
+            if self._signals is not None:
+                df = self._signals
+                logger.info(f"Saving Signals: {strat_dir.name}: {df.shape}")
+                csv_path = strat_dir / "signals.csv"
+
+                # Save with proper index handling
+                if not df.empty:
+                    df.to_csv(csv_path, index=True)
+                else:
+                    # Create empty file with proper headers
+                    # pd.DataFrame(columns=["Open", "High", "Low", "Close"]).to_csv(
+                    #     csv_path, index=True)
+                    logger.info(
+                        f"Signals df for {self.strategy_id} is empty. Skipping save")
+
             if ticker and interval:
-                # Save only this one
-                df = self._signals.get((ticker, interval))
-                logger.info(f"Saving: {ticker}/{interval}: {df.shape}")
-                if df is not None:
-                    base = self.base_filename(ticker, interval)
-                    csv_path = os.path.join(
-                        self.storage_path, f"{base}_signals.csv")
-
-                    # Ensure directory exists
-                    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
-
-                    # Save with proper index handling
-                    if not df.empty:
-                        # if hasattr(df.index, 'tz') and df.index.tz is not None:
-                        #     # Save with timezone info preserved
-                        #     df.to_csv(
-                        #         csv_path, date_format='%Y-%m-%d %H:%M:%S%z', index=True)
-                        # else:
-                            df.to_csv(csv_path, index=True)
-                    else:
-                        # Create empty file with proper headers
-                        pd.DataFrame(columns=["Open", "High", "Low", "Close"]).to_csv(
-                            csv_path, index=True)
+                self._save_ticker_df(
+                    strat_dir=strat_dir,
+                    ticker=ticker,
+                    interval=interval
+                )
             else:
-                # Save everything
-                for (tk, iv), df in self._signals.items():
-                    base = self.base_filename(tk, iv)
-                    csv_path = os.path.join(
-                        self.storage_path, f"{base}_signals.csv")
-                    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
-
-                    if not df.empty:
-                        df.to_csv(csv_path, index=True)
-                    else:
-                        pd.DataFrame(columns=["Open", "High", "Low", "Close"]).to_csv(
-                            csv_path, index=True)
+                for (tk, iv), _ in self._tickers.items():
+                    self._save_ticker_df(
+                        strat_dir=strat_dir,
+                        ticker=tk,
+                        interval=iv
+                    )
 
             # Meta is always saved (covers all tickers)
             tickers_map = {}
-            for tk, iv in self._signals.keys():
+            for tk, iv in self._tickers.keys():
                 tickers_map.setdefault(tk, []).append(iv)
 
             meta = {
                 "strategy_name": self.name,
                 "strategy_class": self.__class__.__name__,
-                "params": self.params,
+                "request_params": self.request_params,
+                "params": self.params or {},
                 "params_hash": self.params_hash,
                 "tickers": tickers_map,
                 "last_update": datetime.now(timezone.utc).isoformat(),
-                "version": "1.0"  # For future compatibility
+                "version": "1.0",  # For future compatibility
+                "is_paused": self._is_paused,  # Add pause status
             }
 
-            meta_path = os.path.join(
-                self.storage_path, self.meta_filename())
+            meta_path = strat_dir / "meta.json"
             with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=4)
 
@@ -490,7 +619,76 @@ class Strategy(ABC):
                 f"Failed to save strategy {self.strategy_id} to disk: {e}")
             raise
 
-    def rehydrate(self, last_updated: Union[datetime, None] = None) -> None:
+    def load_from_disk(self) -> bool:
+        """  
+        Instance method to reload all tickers/intervals from disk.  
+        Returns True if any data was loaded.  
+        """
+        loaded_any = False
+        strat_dir = Path(self.storage_path) / self.disk_safe_strategy_id
+
+        # Read metadata to get tickers map
+        meta = self.load_metadata()
+
+        if not meta:  # Only continue if meta is valid
+            logger.error(f"Failed to load Metadata for {self.strategy_id}")
+            return False
+
+        try:
+            logger.info(f"Reloading from disk: meta: {meta}")
+            tickers_map = meta.get("tickers", {})
+
+            logger.info(f"Reloading from disk: {tickers_map}")
+
+            # Reload signals if existing
+            # Reload signals.csv if existing
+            signals_path = strat_dir / "signals.csv"
+
+            if signals_path.exists():
+                df = pd.read_csv(
+                    signals_path, index_col=0, parse_dates=True
+                )
+                df.index = pd.to_datetime(
+                    df.index, utc=True, format="mixed")
+                self._signals = df
+                logger.info(f"Loaded signals df. {len(self._signals)}")
+            else:
+                logger.info(f"Signals file does not exist. Skipping")
+
+            # Load data for all tickers+intervals
+            for ticker, intervals in tickers_map.items():
+                for interval in intervals:
+                    try:
+                        csv_path = strat_dir / f"{ticker}_{interval}.csv"
+
+                        if csv_path.exists():
+                            df = pd.read_csv(
+                                csv_path, index_col=0, parse_dates=True)
+                            df.index = pd.to_datetime(
+                                df.index, utc=True, format="mixed")
+                            self._tickers[(ticker, interval)] = df
+                            loaded_any = True
+                            logger.info(
+                                f"Loaded signals for {ticker}/{interval}: {df.shape}")
+                        else:
+                            logger.warning(
+                                f"Missing tickers data file: {csv_path}")
+
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to load {ticker}/{interval}: {e}")
+
+            # Call rehydrate if data was loaded and instance is not paused
+            if loaded_any and hasattr(self, 'rehydrate'):
+                self.rehydrate()
+
+            return loaded_any
+
+        except Exception as e:
+            logger.error(f"Failed to reload tickers from disk: {e}")
+            return False
+
+    def rehydrate(self, last_updated: Union[datetime, None] = None) -> bool:
         """Fetch missing candles since last update and subscribe to live feeds"""
         if not last_updated:
             # check if last_updated can be found from meta_data.
@@ -499,90 +697,62 @@ class Strategy(ABC):
             if 'last_updated' not in meta_data:
                 logger.warning(
                     f"last_updated missing in metadata. Rehydration skipped")
-                return
+                return False
+
             last_updated = meta_data.get('last_updated')
-            logger.info(
+            logger.debug(
                 f"Found last Updated in metadata: {last_updated}({last_updated.astimezone()})")
 
         current_time = datetime.now(timezone.utc)
         # Only sync if there's a significant gap
+        logger.info(f"Rehydrating tickers: {self._tickers.keys()}")
 
-        for (ticker, interval) in self._signals.keys():
+        for (ticker, interval) in self._tickers.keys():
             # 3600:  # 1 hour threshold
-            if (current_time - last_updated).total_seconds() > get_interval_timedelta(interval).seconds:
-                if self.data_source:
-                    try:
-                        missing_df = self.data_source.fetch_data(
-                            ticker=ticker,
-                            interval=interval,
-                            start_datetime=last_updated,
-                            callback_url=get_callback_url(ticker, interval)
-                        )
-                        logger.info(
-                            f"{ticker}/{interval}: Fetched {len(missing_df)} missing candles")
+            # if (current_time - last_updated).total_seconds() > get_interval_timedelta(interval).seconds:
 
-                        # Process missing candles through strategy logic
-                        for timestamp, row in missing_df.iterrows():
-                            ohlc = {
-                                "Datetime": timestamp.isoformat(),
-                                "open": row["Open"],
-                                "high": row["High"],
-                                "low": row["Low"],
-                                "close": row["Close"]
-                            }
-                            self.on_new_candle(ticker, interval, ohlc)
-                    except DataSourceError as e:
-                        logger.error(
-                            f"Error in fetching missing data and subscribing. {e}")
-                        pass
-                else:
-                    logger.warning(
-                        "datasource instance missing. Rehydration skipped.")
-
-    def delete_from_disk(self, ticker: Optional[str] = None, interval: Optional[str] = None):
-        """
-        Delete persisted files for either:
-        - specific ticker+interval if provided
-        - ALL tickers for this strategy instance if ticker/interval is None
-        """
-
-        if ticker and interval:
-            # delete just this one
-            base = self.base_filename(ticker, interval)
-            patterns = [
-                os.path.join(self.storage_path, f"{base}_signals.csv"),
-            ]
-        else:
-            # delete everything for this instance
-            prefix = f"{self.name}_{self.params_hash}_"
-            patterns = [os.path.join(self.storage_path, f"{prefix}*")]
-
-        import glob
-        for pattern in patterns:
-            for path in glob.glob(pattern):
+            if self.data_source:
                 try:
-                    os.remove(path)
-                    logger.info(f"🗑️ Deleted {path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not delete {path}: {e}")
-                    pass
+                    df = self._tickers[(ticker, interval)]
+                    # Check if the DataFrame exists and is not empty
+                    if df is not None and not df.empty:
+                        # Get the last timestamp from the DataFrame's index.
+                        # This will be used as the start_datetime for fetching new data.
+                        last_updated = df.index[-1]
 
-        # always refresh meta file if there are still tickers left
-        if ticker and interval:
-            if (ticker, interval) in self._signals:
-                del self._signals[(ticker, interval)]
-            if self._signals:
-                self.save_to_disk()  # rewrite meta with remaining tickers
+                    missing_df = self.data_source.fetch_data(
+                        ticker=ticker,
+                        interval=interval,
+                        start_datetime=last_updated,
+                        callback_url=get_callback_url(ticker, interval)
+                    )
+                    logger.info(
+                        f"{ticker}/{interval}: Fetched {len(missing_df)} missing candles")
+
+                    self.running = True
+                    # Process missing candles through strategy logic
+                    for timestamp, row in missing_df.iterrows():
+                        ohlc = {
+                            "Datetime": timestamp.isoformat(),
+                            "open": row["Open"],
+                            "high": row["High"],
+                            "low": row["Low"],
+                            "close": row["Close"]
+                        }
+                        self.on_new_candle(ticker, interval, ohlc)
+                except DataSourceError as e:
+                    logger.error(
+                        f"Error in fetching missing data and subscribing. {e}")
+                    pass
             else:
-                # if no signals left, nuke meta file
-                meta_path = os.path.join(
-                    self.storage_path, self.meta_filename()
-                )
-                try:
-                    os.remove(meta_path)
-                except FileNotFoundError as e:
-                    logger.warning(f"Failed to delete file {meta_path}: {e}")
-                    pass
+                logger.warning(
+                    "datasource instance missing. Rehydration skipped.")
+                return False
+            # else:
+            #     logger.info(
+            #         f"Time Elapsed: {(current_time - last_updated).total_seconds()} seconds too low for {ticker}/{interval}. Skipped Rehydration")
+
+        return True
 
     def remove_ticker(self, ticker: str, interval: str):
         """
@@ -590,8 +760,8 @@ class Strategy(ABC):
         and delete its data from disk.
         """
         key = (ticker, interval)
-        if key in self._signals:
-            del self._signals[key]
+        if key in self._tickers:
+            del self._tickers[key]
             self.delete_from_disk(ticker, interval)
 
             # remove from reverse map
@@ -603,7 +773,7 @@ class Strategy(ABC):
     # --- accessors for signals/dfs ---
 
     def get_signals_df(self, ticker: str, interval: str) -> Optional[pd.DataFrame]:
-        return self._signals.get((ticker, interval))
+        return self._tickers.get((ticker, interval))
 
     def _get_signal(self, curr_row: pd.Series, prev_row: Optional[pd.Series]) -> str:
         signal = "HOLD"
@@ -691,10 +861,13 @@ def reload_all_instances(storage_path: Optional[str] = None):
     failed_count = 0
 
     # Scan for *_meta.json files
-    for entry in storage.glob("*_meta.json"):
+    for meta_file in storage.glob("*/meta.json"):
         try:
+            # strategy_dir = meta_file.parent  # pass the folder, not meta.json itself
+            instance = Strategy.reload_from_metadata(meta_file, storage)
+
             # Delegate loading to the strategy class
-            instance = Strategy.reload_from_metadata(entry, storage)
+            # instance = Strategy.reload_from_metadata(entry, storage)
 
             if instance:
                 # Register the instance
@@ -707,122 +880,8 @@ def reload_all_instances(storage_path: Optional[str] = None):
                 failed_count += 1
 
         except Exception as e:
-            logger.error(f"Failed to process metadata file {entry.name}: {e}")
-            failed_count += 1
-
-    logger.info(
-        f"Reload complete: {reloaded_count} strategies loaded, {failed_count} failed")
-
-
-def old_reload_all_instances(storage_path: Optional[str] = None):
-    """Reload all strategy instances from disk with improved error handling"""
-
-    storage = Path(storage_path) if storage_path else Path(STORAGE_PATH)
-    if not storage.exists():
-        logger.info(f"Storage path {storage} does not exist, skipping reload")
-        return
-
-    _STRATEGY_INSTANCES.clear()
-    _TICKER_INTERVAL_MAP.clear()
-
-    reloaded_count = 0
-    failed_count = 0
-
-    # scan for *_meta.json files
-    for entry in storage.glob("*_meta.json"):
-        try:
-            with open(entry, "r") as f:
-                meta = json.load(f)
-
-            # Validate metadata structure
-            required_fields = ["strategy_class", "params", "tickers"]
-            missing_fields = [
-                field for field in required_fields if field not in meta]
-            if missing_fields:
-                logger.warning(
-                    f"Invalid metadata in {entry.name}: missing {missing_fields}")
-                failed_count += 1
-                continue
-
-            strategy_class_name = meta.get("strategy_class")
-            params = meta.get("params", {})
-            tickers_map = meta.get("tickers", {})
-            last_update_str = meta.get("last_update")
-
-            # Parse last update timestamp
-            last_update = None
-            if last_update_str:
-                last_update = datetime.fromisoformat(
-                    last_update_str.replace('Z', '+00:00'))
-
-            cls = _STRATEGY_REGISTRY.get(strategy_class_name)
-            if not cls:
-                logger.warning(
-                    f"⚠️ Unknown strategy class {strategy_class_name} in {entry.name}")
-                failed_count += 1
-                continue
-
-            # Create instance
-            try:
-                instance = cls(params=params, storage_path=str(storage))
-
-                # Load data for all tickers+intervals
-                loaded_any = False
-                for ticker, intervals in tickers_map.items():
-                    for interval in intervals:
-                        try:
-                            # Load CSV data
-                            base = instance.base_filename(ticker, interval)
-                            csv_path = storage / f"{base}_signals.csv"
-
-                            if csv_path.exists():
-                                df = pd.read_csv(
-                                    csv_path,
-                                    index_col=0,
-                                    parse_dates=True
-                                )
-                                instance._signals[(ticker, interval)] = df
-                                loaded_any = True
-
-                                logger.info(
-                                    f"Loaded signals for {ticker}/{interval}: {df.shape}")
-
-                            else:
-                                logger.warning(
-                                    f"Missing signals file: {csv_path}")
-
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to load {ticker}/{interval} for {strategy_class_name}: {e}")
-                            failed_count += 1
-
-                if loaded_any:
-                    # Register the instance
-                    # ph = make_params_hash(params)
-                    key = (strategy_class_name, instance.params_hash)
-                    _STRATEGY_INSTANCES[key] = instance
-
-                    instance.rehydrate(last_update)
-
-                    # Update reverse lookup map
-                    for ticker_interval in instance._signals.keys():
-                        _TICKER_INTERVAL_MAP.setdefault(
-                            ticker_interval, []).append(instance)
-
-                    reloaded_count += 1
-                    logger.info(f"Reloaded strategy {instance.strategy_id}")
-                else:
-                    logger.warning(
-                        f"No valid data found for {strategy_class_name}, skipping")
-                    failed_count += 1
-
-            except Exception as e:
-                logger.error(
-                    f"Failed to create instance for {strategy_class_name}: {e}")
-                failed_count += 1
-
-        except Exception as e:
-            logger.error(f"Failed to process metadata file {entry}: {e}")
+            logger.error(
+                f"Failed to process metadata file {meta_file.name}: {e}")
             failed_count += 1
 
     logger.info(
