@@ -118,15 +118,6 @@ class LocalTickerDataSource(DataSource):
 
                 return df
 
-                required_cols = ["Open", "High", "Low", "Close"]
-                missing_cols = [
-                    col for col in required_cols if col not in df.columns]
-                if missing_cols:
-                    raise DataSourceError(
-                        f"Response missing required columns: {missing_cols}")
-
-                return df[required_cols].dropna()
-
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")
                 if attempt == self.max_retries - 1:

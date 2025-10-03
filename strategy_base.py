@@ -15,6 +15,8 @@ from utils.intervals import validate_interval, get_interval_timedelta
 from utils.callback_url import get_callback_url
 from data_source import DataSourceError
 from utils import helpers
+from schema.strategy_schema import CandleFeedRequest, SignalResponse, StrategyDetails, StrategyMetadata
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -155,15 +157,41 @@ def get_strategy_instances_by_ticker_interval(ticker: str, interval: str):
     return _TICKER_INTERVAL_MAP.get((ticker, interval), [])
 
 
-def list_strategy_instances() -> List[Dict[str, Any]]:
-    """Return list of dictionaries with strategy details"""
-    return [
-        {
-            instance.strategy_id: instance.get_status()
-        }
-        for key, instance in _STRATEGY_INSTANCES.items()
-    ]
+# def list_strategy_instances() -> List[Dict[str, Any]]:
+#     """Return list of dictionaries with strategy details"""
+#     return [
+#         {
+#             instance.strategy_id: instance.get_status()
+#         }
+#         for key, instance in _STRATEGY_INSTANCES.items()
+#     ]
 
+def list_strategy_instances() -> List[StrategyDetails]:
+    """Return a list of StrategyDetails for all strategy instances."""
+    result = []
+    for instance in _STRATEGY_INSTANCES.values():
+        meta_dict = instance.load_metadata()
+        # Only pass fields that exist in StrategyMetadata
+        metadata = None
+        if meta_dict:
+            try:
+                metadata = StrategyMetadata(
+                    tickers=meta_dict['tickers'],
+                    params=meta_dict['params'],
+                    last_updated=meta_dict['last_updated']
+                )
+            except Exception as e:
+                logger.warning(f"Failed to parse metadata for {instance.strategy_id}: {e}")
+                metadata = None
+        
+        result.append(
+            StrategyDetails(
+                strategy_id=instance.strategy_id,
+                status=instance.get_status(),
+                metadata=metadata
+            )
+        )
+    return result
 
 def get_strategy_instances_by_name(strategy_name: str):
     """
@@ -226,6 +254,7 @@ class Strategy(ABC):
         self._is_paused: bool = False
 
     def get_status(self) -> str:
+
         if self._is_paused:
             return "PAUSED"
         elif self.running:
@@ -346,7 +375,9 @@ class Strategy(ABC):
         self,
         ticker: str, interval: str,
         params: dict,
-        start_datetime: Optional[datetime] = None
+        start_datetime: Optional[datetime] = None,
+        ohlc_df: Optional[pd.DataFrame] = None,
+        use_callback: bool = True
     ) -> None:
         """Initialize signals and history for one ticker/interval.
         Strategy subclasses should override this."""
@@ -355,7 +386,7 @@ class Strategy(ABC):
             "initialize_ticker must be implemented in subclass")
 
     @abstractmethod
-    def _on_new_candle(self, ticker: str, interval: str, ohlc: dict) -> dict:
+    def _on_new_candles(self, ticker: str, interval: str, new_ohlc_df: pd.DataFrame) -> Dict[str, Any]:
         """
         Child-specific handling for a single new candle.
         Should update self._dfs[(ticker,interval)] and self._tickers[(ticker,interval)]
@@ -387,28 +418,42 @@ class Strategy(ABC):
     # Candle ingestion wrapper
     # -----------------------------------
 
-    def on_new_candle(
-        self, ticker: str, interval: str, ohlc: dict
+    def on_new_candles(
+        self, ticker: str, interval: str, ohlc_list: List[CandleFeedRequest]
+    ) -> dict:
+
+        data_dicts = [c.model_dump() for c in ohlc_list]
+
+        # Create the DataFrame from the list of dictionaries
+        df = pd.DataFrame(data_dicts)
+
+        # Set the 'datetime' column as the index and convert to datetime objects
+        df = df.set_index('datetime')
+        df.index = pd.to_datetime(df.index)
+
+        df = df.rename(
+            columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
+
+        return self.update_new_candles(ticker, interval, df)
+
+    def update_new_candles(
+        self, ticker: str, interval: str, ohlc_df: pd.DataFrame
     ) -> dict:
         if self._is_paused:
             logger.error(f"Strategy {self.strategy_id} is Paused.")
             return {'error': f"Strategy {self.strategy_id} is Paused."}
 
-        result = self._on_new_candle(ticker, interval, ohlc)
+        if ohlc_df.empty:
+            logger.error(
+                f"Received empty DataFrame of candles for {ticker} @ {interval}.")
+            return {'error': f"Received empty DataFrame of candles for {ticker} @ {interval}."}
+
+        ohlc_df = ohlc_df.rename(
+            columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
+        result = self._on_new_candles(
+            ticker=ticker, interval=interval, new_ohlc_df=ohlc_df)
         self.save_to_disk(ticker, interval)
         return result
-
-    def _update_candles(
-        self,
-        ticker: str, interval: str,
-        ohlc_df: pd.DataFrame
-    ):
-        # TODO: ingest multiple candles at once in an efficient manner        
-
-        pass
-        # result = self._on_new_candle(ticker, interval, ohlc)
-        # self.save_to_disk(ticker, interval)
-        # return result
 
     # --- persistence helpers (per ticker/interval) ---
 
@@ -567,6 +612,7 @@ class Strategy(ABC):
             strat_dir = Path(self.storage_path) / self.disk_safe_strategy_id
             strat_dir.mkdir(parents=True, exist_ok=True)
 
+            # Signals is alawys saved
             if self._signals is not None:
                 df = self._signals
                 logger.info(f"Saving Signals: {strat_dir.name}: {df.shape}")
@@ -734,15 +780,17 @@ class Strategy(ABC):
 
                     self.running = True
                     # Process missing candles through strategy logic
-                    for timestamp, row in missing_df.iterrows():
-                        ohlc = {
-                            "Datetime": timestamp.isoformat(),
-                            "open": row["Open"],
-                            "high": row["High"],
-                            "low": row["Low"],
-                            "close": row["Close"]
-                        }
-                        self.on_new_candle(ticker, interval, ohlc)
+                    # for timestamp, row in missing_df.iterrows():
+                    #     ohlc = {
+                    #         "Datetime": timestamp.isoformat(),
+                    #         "open": row["Open"],
+                    #         "high": row["High"],
+                    #         "low": row["Low"],
+                    #         "close": row["Close"]
+                    #     }
+                    # self.on_new_candles(ticker, interval, [ohlc])
+                    self.update_new_candles(ticker, interval, missing_df)
+
                 except DataSourceError as e:
                     logger.error(
                         f"Error in fetching missing data and subscribing. {e}")
@@ -774,81 +822,34 @@ class Strategy(ABC):
                     del _TICKER_INTERVAL_MAP[key]
 
     # --- accessors for signals/dfs ---
+    def get_signals_df(self) -> Optional[pd.DataFrame]:
+        return self._signals if not self._signals.empty else None
 
-    def get_signals_df(self, ticker: str, interval: str) -> Optional[pd.DataFrame]:
-        return self._tickers.get((ticker, interval))
+    def get_ticker_df(self, ticker: str, interval: str) -> Optional[pd.DataFrame]:
+        key = (ticker, interval)
+        return self._tickers.get(key) if key in self._tickers else None
 
-    def _get_signal(self, curr_row: pd.Series, prev_row: Optional[pd.Series]) -> str:
-        signal = "HOLD"
-        if prev_row is not None:
-            if curr_row.get("GoLong") and not prev_row.get("GoLong"):
-                signal = "BUY"
-            elif curr_row.get("GoShort") and not prev_row.get("GoShort"):
-                signal = "SELL"
-        return signal
+    @abstractmethod
+    def get_last_signal(self) -> SignalResponse:
+        '''
+        Return the last signal generated by the strategy.
+        The conctrete strategy class must implement this method.
+        '''
+        pass
 
-    # --- convenience: summary signal logic (same as earlier) ---
-    def _summarize_signal_from_df(self, signals_df: Optional[pd.DataFrame]) -> dict:
-        if signals_df is None or signals_df.empty:
-            return {"message": "No signals yet"}
-        last_row = signals_df.iloc[-1]
-        prev_row = signals_df.iloc[-2] if len(signals_df) > 1 else None
-        # signal = "HOLD"
-        # if prev_row is not None:
-        #     if last_row.get("GoLong") and not prev_row.get("GoLong"):
-        #         signal = "BUY"
-        #     elif last_row.get("GoShort") and not prev_row.get("GoShort"):
-        #         signal = "SELL"
-        signal = self._get_signal(last_row, prev_row)
-        return {
-            "datetime": str(signals_df.index[-1]),
-            "signal": signal,
-            "indicators": {
-                k: float(v) if isinstance(v, (int, float)) else v
-                for k, v in last_row.to_dict().items()
-            }
-        }
-
-    def get_last_signal(self, ticker: str, interval: str) -> dict:
-        df = self.get_signals_df(ticker, interval)
-        res = self._summarize_signal_from_df(df)
-        return {
-            "strategy_id": self.strategy_id,
-            "ticker": ticker,
-            "interval": interval,
-            **res
-        }
-
-    def get_all_signals(self, ticker: str, interval: str, offset: int = 0, limit: Optional[int] = None) -> List[dict]:
-        df = self.get_signals_df(ticker, interval)
-        if df is None or df.empty:
-            return []
-        sliced = df.iloc[offset: (None if limit is None else offset + limit)]
-        results = []
-        prev = None
-        for ts, row in sliced.iterrows():
-            # signal = "HOLD"
-            # if prev is not None:
-            #     if row.get("GoLong") and not prev.get("GoLong"):
-            #         signal = "BUY"
-            #     elif row.get("GoShort") and not prev.get("GoShort"):
-            #         signal = "SELL"
-            signal = self._get_signal(row, prev)
-            results.append({
-                "strategy_id": self.strategy_id,
-                "ticker": ticker,
-                "interval": interval,
-                "datetime": str(ts),
-                "signal": signal,
-                "indicators": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in row.to_dict().items()}
-            })
-            prev = row
-        return results
-
+    @abstractmethod
+    def get_all_signals(self, offset: int = 0, limit: Optional[int] = None, type: Optional[str] = None) -> List[SignalResponse]:
+        '''
+        Return all signals for the given ticker and interval.
+        The conctrete strategy class must implement this method.
+        '''
+        pass
 
 # -------------------------------
 # Reloading all instances from disk
 # -------------------------------
+
+
 def reload_all_instances(storage_path: Optional[str] = None):
     """Reload all strategy instances from disk with improved error handling"""
 

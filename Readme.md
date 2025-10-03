@@ -1,6 +1,6 @@
 # Strategy Builder
 
-**A Python-based framework for building, backtesting, and deploying automated trading strategies with robust data handling, modular strategy definition, and RESTful APIs.**
+**A Python-based framework for building, backtesting, and deploying automated trading strategies with robust data handling, modular strategy definition, RESTful APIs, and a modern Vue.js chart dashboard.**
 
 ## Features
 
@@ -10,6 +10,8 @@
 - **Persistence**: Strategies and their signals are saved per instance and ticker/interval for resilience and rehydration.
 - **Scalable Management**: Multiple strategies, tickers, and intervals can be managed and backtested in parallel.
 - **Robust Validation**: Thorough schema and parameter checks for safe and reproducible execution.
+- **Heikin Ashi Strategy**: Includes a robust Heikin Ashi + EMA crossover strategy with configurable parameters and multi-timeframe support.
+- **Interactive Chart Dashboard**: Modern Vue 3 + Tailwind CSS dashboard (see `static/index.html`) for visualizing strategy signals, OHLC, and EMAs using TradingView Lightweight Charts.
 
 ***
 
@@ -23,7 +25,24 @@ strategy_builder/
 ├── strategy_base.py      # Core Strategy class, registry, instance management
 ├── data_source.py        # DataSource base class and error classes
 ├── requirements.txt      # Python dependencies
-├── .env.example          # Example configuration file
+├── .env.example         # Example configuration file
+├── static/
+│   └── index.html       # Vue.js + Tailwind CSS chart dashboard (see below)
+## Web Dashboard (Vue.js + Tailwind CSS)
+
+The app in `static/index.html` provides a modern, interactive dashboard for visualizing strategy signals and price data.
+
+- Built with Vue 3 and Tailwind CSS for a responsive, dark-themed UI
+- Integrates TradingView Lightweight Charts for OHLC, EMA, and signal visualization
+- Features strategy selection, data source toggling (mock/live), live polling, overlays for loading/errors, and series visibility controls
+- Connects to the backend API for real-time and historical signal data
+
+To use:
+
+1. Start the API server (see below)
+2. Open `static/index.html` in your browser
+3. Select a strategy and interact with the chart controls
+
 │
 ├── data_sources/         # Concrete data source implementations (e.g., yfinance, local)
 ├── schema/               # Pydantic models and request/response schemas
@@ -303,28 +322,36 @@ PUT /strategies/{strategy_id}/resume
 
 ***
 
+
 ## Example: Strategy Definition
 
-To implement a new trading strategy, subclass `Strategy` and place your class in the `strategies/` folder:
+To implement a new trading strategy, subclass `Strategy` and place your class in the `strategies/` folder. Example (see `strategies/heikin_ashi.py` for a full-featured implementation):
 
 ```python
 from strategy_base import Strategy
 
 class MyAwesomeStrategy(Strategy):
-    strategy_name = "MyAwesomeStrategy"
+  strategy_name = "MyAwesomeStrategy"
 
-    @classmethod
-    def validate_creation_request(cls, tickers, params=None):
-        # Validate specific strategy arguments
-        super().validate_creation_request(tickers, params)
-        # Add custom argument checks here
+  @classmethod
+  def validate_creation_request(cls, tickers, params=None):
+    super().validate_creation_request(tickers, params)
+    # Add custom argument checks here
 
-    def initialize_ticker(self, ticker, interval, params, start_datetime=None):
-        # Fetch and initialize candle data, compute indicators
+  def initialize_ticker(self, ticker, interval, params, start_datetime=None):
+    # Fetch and initialize candle data, compute indicators
 
-    def _on_new_candle(self, ticker, interval, ohlc):
-        # Custom per-candle logic returning indicator/data dict
+  def _on_new_candles(self, ticker, interval, ohlc):
+    # Custom per-candle logic returning indicator/data dict
 ```
+
+### Heikin Ashi Strategy
+
+The included `HeikinAshiStrategy` (`strategies/heikin_ashi.py`) uses Heikin Ashi candles and a dual-EMA crossover system to generate trading signals. It supports:
+- Configurable fast/slow EMA periods and shifts
+- Multi-timeframe analysis (e.g., 15m vs 1h)
+- Long-only or long/short modes
+- Full signal history and last-signal queries
 
 See `strategies/heikin_ashi.py` and `strategies/pair_trading_strategy.py` for real examples.
 

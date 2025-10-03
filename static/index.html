@@ -1,0 +1,1021 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strategy Builder - Charts</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configure Tailwind to use Inter font -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <!-- Load Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Load TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        /* Custom styles for the chart container */
+        #chart-container {
+            width: 100%;
+            height: 50vh;
+            /* Responsive height */
+            background-color: #1f2937;
+            /* Dark background */
+            position: relative;
+        }
+
+        /* Style for the OHLC information display */
+        #ohlc-display {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            background-color: rgba(31, 41, 55, 0.9);
+            padding: 8px 12px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            pointer-events: none;
+            min-width: 200px;
+        }
+
+        /* --- Glass Button Styles --- */
+        .glass-button {
+            /* Semi-transparent gray background */
+            background-color: rgba(75, 85, 99, 0.4);
+            /* Frosted glass effect */
+            backdrop-filter: blur(8px);
+            /* Subtle light border for depth */
+            border: 1px solid rgba(156, 163, 175, 0.2);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
+            /* Transition for all changes */
+            transition: all 0.2s ease-in-out;
+        }
+
+        .glass-button:hover {
+            /* Slightly less transparent on hover */
+            background-color: rgba(75, 85, 99, 0.6);
+        }
+
+        .glass-button:active {
+            /* Slight press effect */
+            transform: scale(0.95);
+        }
+
+        /* --- Toggle Icon Styles --- */
+        .toggle-icon {
+            display: flex;
+            align-items: center;
+            padding: 6px 10px;
+            border-radius: 9999px;
+            /* Pill shape */
+            cursor: pointer;
+            transition: background-color 0.2s, box-shadow 0.2s;
+            font-weight: 600;
+        }
+
+        .toggle-icon:hover {
+            background-color: rgba(107, 114, 128, 0.3);
+            /* Hover effect */
+        }
+
+        .toggle-icon:active {
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.5);
+            /* Focus/Active ring */
+        }
+
+
+        /* --- Tooltip Styles --- */
+        .tooltip-container {
+            position: relative;
+        }
+
+        .tooltip-text {
+            visibility: hidden;
+            background-color: #374151;
+            color: #fff;
+            text-align: center;
+            border-radius: 6px;
+            padding: 5px 8px;
+            position: absolute;
+            z-index: 50;
+            bottom: 120%;
+            left: 50%;
+            transform: translateX(-50%);
+            white-space: nowrap;
+            opacity: 0;
+            transition: opacity 0.2s, visibility 0.2s;
+            pointer-events: none;
+            font-size: 12px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+            font-weight: 500;
+        }
+
+        /* Show the tooltip when hovering over the parent button/group */
+        .tooltip-container:hover .tooltip-text {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        /* Ensure the body and html take full height for proper centering */
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-900 text-gray-100 p-4 sm:p-8">
+
+    <div id="app" class="flex flex-col items-center min-h-full">
+        <!-- Main Application Card -->
+        <div class="w-full max-w-6xl bg-gray-800 rounded-xl shadow-2xl p-4 sm:p-6 space-y-6">
+            <h1 class="text-3xl font-extrabold text-blue-400 border-b border-gray-700 pb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"
+                    class="w-6 h-6 inline-block mr-2 align-text-bottom">
+                    <path fill-rule="evenodd"
+                        d="M12 1.5a5.25 5.25 0 0 0-5.25 5.25v7.5a5.25 5.25 0 0 0 10.5 0v-7.5A5.25 5.25 0 0 0 12 1.5ZM5.25 7.5v7.5a6.75 6.75 0 1 0 13.5 0v-7.5A5.25 5.25 0 0 0 12 6a.75.75 0 0 0-.75.75c0 .414.336.75.75.75h.007a.75.75 0 0 0 .75-.75.75.75 0 0 0-.007-.75h-.008A5.25 5.25 0 0 1 12 7.5Z"
+                        clip-rule="evenodd" />
+                </svg>
+                Strategy Builder - Charts
+            </h1>
+
+            <!-- Chart Controls -->
+            <div class="flex flex-col gap-4 pb-4">
+
+                <!-- ROW 1: Strategy Selection, Data Mode, and Refresh List -->
+                <div class="flex flex-col sm:flex-row sm:items-center justify-start gap-4 sm:gap-6">
+                    <!-- Strategy Selector -->
+                    <div class="flex items-center space-x-3">
+                        <label for="strategy-select" class="text-sm text-gray-400 whitespace-nowrap">Strategy:</label>
+                        <select id="strategy-select" v-model="selectedStrategy"
+                            :disabled="strategyNames.length === 0 || isFetchingSignals || isLoading"
+                            class="p-2 border border-gray-600 bg-gray-700 text-gray-200 rounded-lg focus:ring-blue-500 focus:border-blue-500 w-full sm:w-auto min-w-[200px]">
+                            <option v-if="strategyNames.length === 0" :value="null" disabled>Loading...</option>
+                            <option v-for="name in strategyNames" :key="name" :value="name">{{ name }}</option>
+                        </select>
+                        <button @click="fetchStrategies" :disabled="isFetchingList || isLoading"
+                            class="tooltip-container relative w-10 h-10 glass-button text-white rounded-xl transition duration-150 ease-in-out transform active:scale-95 disabled:opacity-50 flex items-center justify-center">
+                            <span class="text-2xl">{{ isFetchingList ? '⏳' : '⟳' }}</span>
+                            <span class="tooltip-text">Refresh Strategy List</span>
+                        </button>
+                    </div>
+
+                    <!-- Data Mode Toggle -->
+                    <div class="flex items-center space-x-3 p-2 bg-gray-700 rounded-lg shadow-inner">
+                        <label for="mock-toggle"
+                            class="text-sm font-semibold text-gray-400 whitespace-nowrap">Data:</label>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm transition duration-200"
+                                :class="{'text-gray-400': isMock, 'text-green-400 font-bold': !isMock}">Live</span>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="mock-toggle" class="sr-only peer" v-model="isMock"
+                                    :disabled="isFetchingSignals || isLoading">
+                                <div
+                                    class="w-11 h-6 bg-gray-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600">
+                                </div>
+                            </label>
+                            <span class="text-sm transition duration-200"
+                                :class="{'text-red-400 font-bold': isMock, 'text-gray-400': !isMock}">Mock</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-3 p-2 bg-gray-700 rounded-lg shadow-inner">
+                        <!-- Candle Toggle -->
+                        <button @click="toggleVisibility('candle')"
+                            :title="isCandleVisible ? 'Hide Candlesticks' : 'Show Candlesticks'"
+                            class="toggle-icon text-white"
+                            :class="isCandleVisible ? 'bg-gray-600' : 'bg-gray-800 text-gray-500'">
+                            <span class="mr-2 text-lg">{{ isCandleVisible ? '👁️' : '🚫' }}</span>
+                            Candle
+                        </button>
+
+                        <!-- Fast EMA Toggle -->
+                        <button @click="toggleVisibility('fastEma')"
+                            :title="isFastEmaVisible ? 'Hide Fast EMA' : 'Show Fast EMA'" class="toggle-icon"
+                            :style="{ backgroundColor: isFastEmaVisible ? 'rgba(96, 165, 250, 0.2)' : 'rgba(96, 165, 250, 0.05)', color: isFastEmaVisible ? '#60a5fa' : '#4b5563' }">
+                            <span class="mr-2 text-lg">{{ isFastEmaVisible ? '👁️' : '🚫' }}</span>
+                            Fast EMA
+                        </button>
+
+                        <!-- Slow EMA Toggle -->
+                        <button @click="toggleVisibility('slowEma')"
+                            :title="isSlowEmaVisible ? 'Hide Slow EMA' : 'Show Slow EMA'" class="toggle-icon"
+                            :style="{ backgroundColor: isSlowEmaVisible ? 'rgba(252, 211, 77, 0.2)' : 'rgba(252, 211, 77, 0.05)', color: isSlowEmaVisible ? '#fcd34d' : '#4b5563' }">
+                            <span class="mr-2 text-lg">{{ isSlowEmaVisible ? '👁️' : '🚫' }}</span>
+                            Slow EMA
+                        </button>
+                    </div>
+
+                </div> <!-- End Row 1 -->
+
+                <!-- ROW 2: Crosshair, Data Actions, and Series Visibility -->
+                <div
+                    class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-gray-700">
+                    <!-- Chart Data Action Buttons (Load More and Full Refresh) -->
+                    <div class="flex gap-3 w-full sm:w-auto mt-4 md:mt-0">
+                        <!-- Crosshair Toggle -->
+                        <div class="flex items-center space-x-2">
+                            <label for="crosshair-toggle"
+                                class="text-sm font-semibold text-gray-400 whitespace-nowrap"><span
+                                    class="text-2xl">𖦏</span></label>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="crosshair-toggle" class="sr-only peer"
+                                    v-model="isCrosshairActive">
+                                <div class="w-11 h-6 bg-gray-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"
+                                    :class="isCrosshairActive ? 'peer-checked:bg-teal-500' : 'peer-checked:bg-gray-500'">
+                                </div>
+                            </label>
+                        </div>
+
+                        <!-- Load More Data (Single Batch) -->
+                        <button @click="fetchSignals(selectedStrategy, true)" :disabled="isLoading || !selectedStrategy"
+                            class="tooltip-container relative w-10 h-10 glass-button text-white rounded-xl active:scale-95 disabled:opacity-50 flex items-center justify-center">
+                            <span class="text-2xl">⬇</span>
+                            <span class="tooltip-text">Load More (Offset: {{ currentDataCount }})</span>
+                        </button>
+                        <!-- Full Refresh (Initiates Backfill & Polling Cycle) -->
+                        <button @click="backfillDataAndStartPolling(selectedStrategy)"
+                            :disabled="isLoading || !selectedStrategy"
+                            class="tooltip-container relative w-10 h-10 glass-button text-white rounded-xl active:scale-95 disabled:opacity-50 flex items-center justify-center">
+                            <span class="text-2xl">🧹</span>
+                            <span class="tooltip-text">Reset & Restart Auto-Load</span>
+                        </button>
+                    </div>
+
+
+                </div> <!-- End Row 2 -->
+            </div>
+
+
+            <!-- Chart Container -->
+            <div id="chart-container" class="rounded-lg border border-gray-700 shadow-inner">
+                <!-- ERROR Overlay -->
+                <div v-if="errorMessage"
+                    class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50 rounded-lg pointer-events-auto">
+                    <div
+                        class="bg-red-700 text-white px-8 py-6 rounded-xl shadow-2xl text-xl font-bold border border-red-500">
+                        🚨 Error: {{ errorMessage }}
+                    </div>
+                </div>
+                <!-- LOADING Overlay -->
+                <div v-if="isLoading"
+                    class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50 rounded-lg pointer-events-auto">
+                    <div
+                        class="bg-blue-600 text-white px-8 py-6 rounded-xl shadow-2xl text-xl font-bold flex items-center space-x-3">
+                        <!-- Simple Spinner Animation -->
+                        <svg class="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
+                            viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4">
+                            </circle>
+                            <path class="opacity-75" fill="currentColor"
+                                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+                            </path>
+                        </svg>
+                        <span>
+                            {{ isFetchingSignals ? 'Fetching current batch...' : 'Backfilling historical data...' }}
+                        </span>
+                    </div>
+                </div>
+                <!-- OHLC Display Overlay -->
+                <div id="ohlc-display" ref="ohlcDisplay" class="text-gray-100 text-xs sm:text-sm hidden">
+                    <!-- Content injected by JavaScript -->
+                </div>
+                <!-- Wrapper for Lightweight Charts Instance -->
+                <div id="lightweight-chart-wrapper" ref="chartContainer" class="w-full h-full"></div>
+            </div>
+
+            <p class="text-xs text-center text-gray-500">
+                Current Strategy: **{{ selectedStrategy || 'Select a Strategy' }}** |
+                <span v-if="isLoading" class="text-yellow-400">
+                    {{ isFetchingSignals ? 'Fetching current batch...' : 'Backfilling historical data...' }}
+                </span>
+                <span v-else>
+                    Signals and Data Loaded.
+                    <span v-if="isPollingActive" class="text-green-400">Live polling active (1 min interval).</span>
+                    <span v-else class="text-gray-500">Polling inactive.</span>
+                </span>
+                | Last updated: {{ lastUpdate }}
+            </p>
+            <p class="text-xs text-center text-gray-500 mt-2">
+                **Data Source:** <span class="font-bold" :class="isMock ? 'text-red-400' : 'text-green-400'">{{ isMock ?
+                    'MOCK DATA' : 'LIVE API' }}</span>
+                (Base URL: {{ BASE_URL }})
+            </p>
+        </div>
+    </div>
+
+    <script type="module">
+        const { createApp, ref, onMounted, onUnmounted, watch } = Vue;
+
+        const LC = window.LightweightCharts;
+
+        const App = {
+            setup() {
+                // Refs for Vue state
+                const chartContainer = ref(null);
+                const ohlcDisplay = ref(null);
+                const initialized = ref(false);
+                const lastUpdate = ref('Never');
+                const isLoading = ref(false);
+                const isFetchingList = ref(false);
+                const isFetchingSignals = ref(false);
+                const isPollingActive = ref(false);
+                const errorMessage = ref(null);
+
+
+                // Strategy State
+                const strategyNames = ref([]);
+                const selectedStrategy = ref(null);
+                const BASE_URL = 'http://127.0.0.1:8000'; // Placeholder for the actual backend URL
+                const isMock = ref(false); // Toggles between Mock and Live data loading
+
+                // --- Chart Control Toggles ---
+                const isCrosshairActive = ref(true);
+                const isCandleVisible = ref(true);
+                const isFastEmaVisible = ref(true);
+                const isSlowEmaVisible = ref(true);
+
+
+                // --- Data Cache and Count for Offset Logic ---
+                // The cache now stores the actual OHLC and EMA data for efficient bulk updates.
+                const dataCache = ref({
+                    ohlc: [],
+                    fastEMA: [],
+                    slowEMA: [],
+                    markers: [],
+                    markersByTime: new Map()
+                });
+                const currentDataCount = ref(0); // Tracks how many data points are currently loaded
+
+                // Internal chart variables (not reactive, managed manually)
+                let chart = null;
+                let candleSeries = null;
+                let fastMASeries = null;
+                let slowMASeries = null;
+                let ohlcDisplayElement = null;
+                let candleSeriesMarkers = null; // Stores the MarkersID for clearing later
+                let dataPollingInterval = null; // Stores the setInterval ID
+
+                // Helper to format prices
+                const priceFormatter = new Intl.NumberFormat('en-US', {
+                    //style: 'currency',
+                    //currency: 'USD',
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                });
+
+                // --- Polling Control Functions ---
+                const stopDataPolling = () => {
+                    if (dataPollingInterval !== null) {
+                        clearInterval(dataPollingInterval);
+                        dataPollingInterval = null;
+                        isPollingActive.value = false;
+                        console.log("Data polling stopped.");
+                    }
+                };
+
+                const startPolling = (strategyId) => {
+                    stopDataPolling(); // Clear old timer
+
+                    const POLLING_INTERVAL_MS = 60000; // 1 minute
+
+                    const livePoll = async () => {
+                        if (isFetchingSignals.value) return;
+
+                        console.log(`[LIVE] Polling new data for ${strategyId}...`);
+                        // Append mode is used for live polling (true)
+                        await fetchSignals(strategyId, true);
+                    };
+
+                    // Perform initial live poll immediately before setting the interval
+                    livePoll();
+
+                    console.log(`Starting 1-minute live polling for ${strategyId}.`);
+                    dataPollingInterval = setInterval(livePoll, POLLING_INTERVAL_MS);
+                    isPollingActive.value = true;
+                };
+
+                // --- Method to toggle visibility based on type ---
+                const toggleVisibility = (type) => {
+                    switch (type) {
+                        case 'candle':
+                            isCandleVisible.value = !isCandleVisible.value;
+                            break;
+                        case 'fastEma':
+                            isFastEmaVisible.value = !isFastEmaVisible.value;
+                            break;
+                        case 'slowEma':
+                            isSlowEmaVisible.value = !isSlowEmaVisible.value;
+                            break;
+                    }
+                };
+
+                // --- Watchers for series visibility: Update chart options ---
+                watch(isCandleVisible, (isVisible) => {
+                    if (candleSeries) {
+                        candleSeries.applyOptions({ visible: isVisible });
+                    }
+                });
+
+                watch(isFastEmaVisible, (isVisible) => {
+                    if (fastMASeries) {
+                        fastMASeries.applyOptions({ visible: isVisible });
+                    }
+                });
+
+                watch(isSlowEmaVisible, (isVisible) => {
+                    if (slowMASeries) {
+                        slowMASeries.applyOptions({ visible: isVisible });
+                    }
+                });
+
+                // --- Chart Clearing Logic: Ensures all UI elements and cache are reset ---
+                const resetChartAndData = () => {
+                    if (candleSeries) {
+                        // 1. Clear the Lightweight Charts Series Data
+                        candleSeries.setData([]);
+                        fastMASeries.setData([]);
+                        slowMASeries.setData([]);
+
+                        if (candleSeriesMarkers) {
+                            console.log("Clearing Markers", candleSeriesMarkers.markers().length)
+                            candleSeriesMarkers.setMarkers([]);
+                        }
+
+                        // 3. Reset the local data cache and offset tracker
+                        dataCache.value = {
+                            ohlc: [],
+                            fastEMA: [],
+                            slowEMA: [],
+                            markers: [],
+                            markersByTime: new Map()
+                        };
+                        currentDataCount.value = 0;
+
+                        // 4. Hide the OHLC display
+                        if (ohlcDisplayElement) {
+                            ohlcDisplayElement.classList.add('hidden');
+                        }
+
+                        lastUpdate.value = 'Data Cleared';
+                        errorMessage.value = null; // Clear any previous error
+                    }
+                };
+
+                // --- Mock Data Generation: Returns data in the /signals endpoint format ---
+                const generateMockSignalData = (count) => {
+                    const data = [];
+                    let lastClose = 10000;
+                    // Start date is far in the past to ensure data is chronological
+                    const startTime = new Date(Date.UTC(2023, 0, 1));
+                    const signals = ['BUY', 'SELL', 'HOLD'];
+
+                    for (let i = 0; i < count; i++) {
+                        const date = new Date(startTime.getTime() + i * 24 * 60 * 60 * 1000);
+                        const datetimeStr = date.toISOString().replace('T', ' ').substring(0, 19) + '+00:00';
+
+                        const open = lastClose * (1 + (Math.random() - 0.5) * 0.001);
+                        const close = open * (1 + (Math.random() - 0.5) * 0.001);
+                        const high = Math.max(open, close) * (1 + Math.random() * 0.0005);
+                        const low = Math.min(open, close) * (1 - Math.random() * 0.0005);
+
+                        const HA_open = (i === 0) ? open : (data[i - 1].indicators.HA_open + data[i - 1].indicators.HA_close) / 2;
+                        const HA_close = (open + high + low + close) / 4;
+                        const HA_high = Math.max(high, HA_open, HA_close);
+                        const HA_low = Math.min(low, HA_open, HA_close);
+
+                        const randomSignal = (i % 20 === 0 && i > 0) ? signals[Math.floor(Math.random() * 2)] : 'HOLD';
+
+                        data.push({
+                            datetime: datetimeStr,
+                            ticker: "BTCUSD",
+                            interval: "1d",
+                            signal: randomSignal,
+                            indicators: {
+                                "HA_open": parseFloat(HA_open.toFixed(2)),
+                                "HA_high": parseFloat(HA_high.toFixed(2)),
+                                "HA_low": parseFloat(HA_low.toFixed(2)),
+                                "HA_close": parseFloat(HA_close.toFixed(2)),
+                                "FastEMA": parseFloat((open * 1.0002 + (Math.random() * 1 - 0.5)).toFixed(2)),
+                                "SlowEMA": parseFloat((open * 1.0001 + (Math.random() * 0.5 - 0.25)).toFixed(2)),
+                            },
+                            message: (randomSignal !== 'HOLD') ? `${randomSignal} Trigger for ${i}` : null
+                        });
+                        lastClose = close;
+                    }
+                    return data;
+                };
+
+                // Fetch with Retry (Exponential Backoff)
+                async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+                    for (let i = 0; i < maxRetries; i++) {
+                        try {
+                            const response = await fetch(url, options);
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
+                            }
+                            return response;
+                        } catch (error) {
+                            if (i < maxRetries - 1) {
+                                const delay = Math.pow(2, i) * 1000;
+                                await new Promise(resolve => setTimeout(resolve, delay)); // Keep this commented out for fast testing, uncomment for production-style retry logic
+                            } else {
+                                throw error;
+                            }
+                        }
+                    }
+                }
+
+
+                // --- API Call: Fetch Strategy List ---
+                const fetchStrategies = async () => {
+                    isFetchingList.value = true;
+                    strategyNames.value = [];
+                    let names = [];
+
+                    try {
+                        if (!isMock.value) {
+                            // --- LIVE API CALL ---
+                            const endpoint = `${BASE_URL}/strategies/instances`;
+                            const response = await fetchWithRetry(endpoint);
+                            const data = await response.json();
+                            names = data.map(strategy => strategy.strategy_id);
+                            // --- END LIVE API CALL ---
+                        } else {
+
+                            // --- MOCKED RESPONSE ---
+                            await new Promise(resolve => setTimeout(resolve, 300));
+
+                            const mockStrategies = [
+                                { "strategy_id": "HeikinAshiStrategy:000011111", "status": "RUNNING", "metadata": {} },
+                                { "strategy_id": "MACD_Crossover:0011223344", "status": "STOPPED", "metadata": {} },
+                                { "strategy_id": "BollingerBands:112233333", "status": "RUNNING", "metadata": {} },
+                            ];
+                            names = mockStrategies.map(strategy => strategy.strategy_id);
+                            console.log("Mock Strategies...", names)
+                            // --- END MOCKED RESPONSE ---
+                        }
+
+                        strategyNames.value = names;
+                        if (!selectedStrategy.value || !names.includes(selectedStrategy.value)) {
+                            if (names.length > 0) {
+                                selectedStrategy.value = names[0];
+                            } else {
+                                selectedStrategy.value = null; // Clear selection if no strategies are returned
+                            }
+                        }
+                    } catch (error) {
+                        console.error("Failed to fetch strategies:", error);
+                        errorMessage.value = "Failed to load strategy list. Check API connection.";
+                    } finally {
+                        isFetchingList.value = false;
+                    }
+                };
+
+                // --- API Call: Fetch Signals  (Single Batch) (Data, Indicators, and Markers) ---
+                const fetchSignals = async (strategyId, appendMode = false) => {
+                    if (!strategyId || !candleSeries)
+                        return false;
+
+                    isFetchingSignals.value = true;
+                    errorMessage.value = null; // Clear error message
+
+                    try {
+                        let offset = 0;
+                        const limit = 1000;
+                        const isInitialLoad = !appendMode;
+
+                        if (isInitialLoad) {
+                            // Full Reset: Clear UI and cache
+                            resetChartAndData();
+                        } else {
+                            // Append Mode: Use current data count as offset
+                            offset = currentDataCount.value;
+                        }
+
+                        const endpoint = `${BASE_URL}/strategies/${strategyId}/signals?offset=${offset}&limit=${limit}`;
+                        let fetchedData;
+
+                        if (!isMock.value) {
+                            // --- LIVE API CALL ---
+                            console.log(`Live API Request: ${endpoint}`);
+                            const response = await fetchWithRetry(endpoint);
+                            fetchedData = await response.json();
+                            // --- END LIVE API CALL ---
+
+                        } else {
+
+                            // --- Mocked Signal Data ---
+                            await new Promise(resolve => setTimeout(resolve, isInitialLoad ? 1000 : 500));
+
+                            const totalPointsNeeded = offset + limit;
+                            const mockDataMaxSize = 3000;
+                            const pointsToGenerate = Math.min(totalPointsNeeded, mockDataMaxSize);
+
+                            const fullMockData = generateMockSignalData(pointsToGenerate);
+                            // Slice the required data based on the calculated offset
+                            fetchedData = fullMockData.slice(offset, offset + limit);
+                            // --- End Mock Data ---
+                        }
+
+
+                        if (fetchedData.length === 0) {
+                            console.log(`No new data returned for ${strategyId} in ${appendMode ? 'append' : 'full'} mode.`);
+                            return false;
+                        }
+
+                        const newOhlcData = [];
+                        const newFastEmaData = [];
+                        const newSlowEmaData = [];
+                        const newMarkers = [];
+
+                        // Process fetched data into chart-compatible formats
+                        for (const item of fetchedData) {
+                            const HA_indicators = item.indicators;
+
+                            const isoString = item.datetime.replace(' ', 'T');
+                            const timeInSeconds = Math.floor(new Date(isoString).getTime() / 1000);
+
+                            if (timeInSeconds && HA_indicators) {
+                                // 1. Prepare OHLC data
+                                newOhlcData.push({
+                                    time: timeInSeconds,
+                                    open: HA_indicators.HA_open,
+                                    high: HA_indicators.HA_high,
+                                    low: HA_indicators.HA_low,
+                                    close: HA_indicators.HA_close,
+                                });
+
+                                // 2. Prepare EMA data
+                                newFastEmaData.push({ time: timeInSeconds, value: HA_indicators.FastEMA });
+                                newSlowEmaData.push({ time: timeInSeconds, value: HA_indicators.SlowEMA });
+
+                                // 3. Prepare Marker data
+                                if (item.signal && item.signal !== 'HOLD') {
+                                    let possible_signal_price = ((HA_indicators.HA_high + HA_indicators.HA_low) / 2).toFixed(2);
+                                    let color, shape, position;
+                                    let text = item.message || `${item.signal} @ ${possible_signal_price}`;
+
+                                    switch (item.signal) {
+                                        case 'BUY':
+                                            color = '#26a69a'; // Green
+                                            shape = 'arrowUp';
+                                            position = 'belowBar';
+                                            break;
+                                        case 'SELL':
+                                            color = '#ef5350'; // Red
+                                            shape = 'arrowDown';
+                                            position = 'aboveBar';
+                                            break;
+                                    }
+
+                                    const marker_deets = {
+                                        time: timeInSeconds,
+                                        position: position,
+                                        color: color,
+                                        shape: shape,
+                                        text: text,
+                                    }
+
+                                    newMarkers.push(marker_deets);
+                                    dataCache.value.markersByTime.set(marker_deets.time, marker_deets);
+                                }
+                            }
+                        }
+
+                        // Merge new data with cache
+                        dataCache.value.ohlc.push(...newOhlcData);
+                        dataCache.value.fastEMA.push(...newFastEmaData);
+                        dataCache.value.slowEMA.push(...newSlowEmaData);
+                        dataCache.value.markers.push(...newMarkers);
+
+                        // 4. Apply all data to the chart
+                        candleSeries.setData(dataCache.value.ohlc);
+                        fastMASeries.setData(dataCache.value.fastEMA);
+                        slowMASeries.setData(dataCache.value.slowEMA);
+
+                        // 5. Apply markers
+                        if (candleSeriesMarkers) {
+                            console.log("Setting Markers", dataCache.value.markers.length)
+                            candleSeriesMarkers.setMarkers(dataCache.value.markers);
+                        }
+
+                        // Update total data count
+                        currentDataCount.value = dataCache.value.ohlc.length;
+
+                        console.log(`Successfully loaded ${fetchedData.length} new points (Total: ${currentDataCount.value}) for ${strategyId}`);
+                        lastUpdate.value = new Date().toLocaleTimeString();
+                        return true; // Data successfully fetched and applied
+
+
+                    } catch (error) {
+                        console.error(`Failed to fetch signals for ${strategyId}:`, error);
+                        errorMessage.value = `Failed to load chart data for ${strategyId}. Server unreachable or returned bad data.`;
+                        return false;
+                    } finally {
+                        isFetchingSignals.value = false;
+                        isLoading.value = false;
+                    }
+                };
+
+                // --- Backfill & Polling Orchestrator ---
+
+                const backfillDataAndStartPolling = async (strategyId) => {
+                    stopDataPolling();
+
+                    if (!strategyId) return;
+
+                    console.log(`Starting initial load and backfill for ${strategyId}...`);
+                    isLoading.value = true;
+
+                    // 1. Initial Load (full reset, uses setData)
+                    let hasMoreData = await fetchSignals(strategyId, false);
+
+                    // 2. Backfilling Loop (uses setData with appending)
+                    let backfillCount = 0;
+                    while (hasMoreData) {
+                        await new Promise(r => setTimeout(r, 50));
+                        console.log(`[BACKFILL] Loading batch ${backfillCount + 1}. Total points: ${currentDataCount.value}`);
+                        hasMoreData = await fetchSignals(strategyId, true);
+                        if (hasMoreData) backfillCount++;
+                    }
+
+                    isLoading.value = false;
+                    console.log(`Backfilling complete. Fetched ${backfillCount} additional batches.`);
+
+
+                    // 3. Live 1-Minute Polling
+                    startPolling(strategyId);
+                };
+
+                // Time formatting for tick marks
+                function customTimeFormatter(time, tickMarkType, locale) {
+                    const date = new Date(time * 1000); // Convert internal UTC timestamp (seconds) to a local Date object
+
+                    // If the tick mark is for time or time with seconds, format it
+                    // The library will automatically provide these tick types when you zoom in
+                    // TickMarkType 3 is 'Time', 4 is 'TimeWithSeconds'
+                    if (tickMarkType === 3 || tickMarkType === 4) {
+                        const options = {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: tickMarkType === 4 ? '2-digit' : undefined,
+                        };
+                        // Add the date part only if the tick mark is near a change of day
+                        // This is a manual check; the default formatter does this better
+                        return new Intl.DateTimeFormat(locale, options).format(date);
+                    }
+
+                    // For all other tick mark types (year, month, day), return null
+                    // The library's default formatter will take over, displaying date and time based on zoom level
+                    return null;
+                }
+
+                // --- Chart Initialization ---
+                const initializeChart = () => {
+                    if (!chartContainer.value || !LC) return;
+
+                    // Clear the container first
+                    chartContainer.value.innerHTML = `
+                        <!-- OHLC Display is already in Vue HTML, just need the chart wrapper -->
+                        <div id="lightweight-chart-wrapper" style="width: 100%; height: 100%;"></div>
+                    `;
+                    // Get the reference to the OHLC display element which is outside the chart wrapper
+                    // ohlcDisplayElement = document.getElementById('ohlc-display');
+                    const ohlcDisplayElement = ohlcDisplay.value;
+
+
+                    const chartOptions = {
+                        container: document.getElementById('lightweight-chart-wrapper'),
+                        width: chartContainer.value.clientWidth,
+                        height: chartContainer.value.clientHeight,
+                        layout: {
+                            background: { type: LC.ColorType.Solid, color: '#1f2937' },
+                            textColor: '#d1d4dc',
+                            fontFamily: 'Inter',
+                        },
+                        grid: {
+                            vertLines: { color: '#374151' },
+                            horzLines: { color: '#374151' },
+                        },
+                        crosshair: {
+                            mode: LC.CrosshairMode.Magnet,
+                        },
+                        priceScale: {
+                            borderColor: '#4b5563',
+                        },
+                        timeScale: {
+                            borderColor: '#4b5563',
+                            timeVisible: true,
+                            secondsVisible: true,
+                            tickMarkFormatter: customTimeFormatter,
+                        },
+                        localization: {
+                            timeFormatter: (time) => {
+                                const date = new Date(time * 1000);
+                                return date.toLocaleString();
+                            },
+                        },
+
+                    };
+
+                    chart = LC.createChart(chartContainer.value.querySelector('#lightweight-chart-wrapper'), chartOptions);
+
+                    try {
+                        // 1. Candlestick Series (Base)
+                        candleSeries = chart.addSeries(LC.CandlestickSeries, {
+                            upColor: '#26a69a',
+                            downColor: '#ef5350',
+                            borderDownColor: '#ef5350',
+                            borderUpColor: '#26a69a',
+                            wickDownColor: '#ef5350',
+                            wickUpColor: '#26a69a',
+                            visible: isCandleVisible.value,
+                        });
+
+                        // Store the reference to the marker manager object.
+                        candleSeriesMarkers = LC.createSeriesMarkers(candleSeries, []);
+
+                        // 2. Fast EMA Series
+                        fastMASeries = chart.addSeries(LC.LineSeries, {
+                            color: '#60a5fa', // Blue
+                            lineWidth: 2,
+                            title: 'Fast EMA',
+                            priceLineVisible: false,
+                            visible: isFastEmaVisible.value
+                        });
+
+                        // 3. Slow EMA Series
+                        slowMASeries = chart.addSeries(LC.LineSeries, {
+                            color: '#fcd34d', // Yellow/Amber
+                            lineWidth: 2,
+                            title: 'Slow EMA',
+                            priceLineVisible: false,
+                            visible: isSlowEmaVisible.value
+                        });
+
+                        // 4. Implement Crosshair Move Listener for OHLC Display
+                        chart.subscribeCrosshairMove((param) => {
+                            // Check if crosshair tracking is active
+                            if (!isCrosshairActive.value || !ohlcDisplayElement) {
+                                ohlcDisplayElement.classList.add('hidden');
+                                return;
+                            }
+
+                            console.log(param)
+
+                            if (param.time) {
+                                // Get the data point for the specific time on the candlestick series
+                                const data = param.seriesData.get(candleSeries);
+                                const markerAtPosition = dataCache.value.markersByTime.get(param.time);
+
+                                if (data) {
+                                    const { open, high, low, close } = data;
+
+                                    // Determine color based on close > open
+                                    const colorClass = close >= open ? 'text-green-400' : 'text-red-400';
+
+                                    const formattedTime = new Date(param.time * 1000).toLocaleString();
+                                    const current_tz = Intl.DateTimeFormat({ timeZoneName: 'shortGeneric' }).resolvedOptions().timeZone;
+
+
+                                    let markerInfo = '';
+                                    console.log("markerAtPosition:", markerAtPosition);
+                                    if (markerAtPosition) {
+                                        markerInfo =
+                                            `<span style="color: ${markerAtPosition.color};">
+                                            📍 ${markerAtPosition.text || `${markerAtPosition.shape} Signal`}
+                                            </span>`
+                                    }
+                                    ohlcDisplayElement.classList.remove('hidden');
+                                    ohlcDisplayElement.innerHTML = `                                        
+                                        <div class="flex items-center justify-between gap-4 text-sm font-semibold">
+                                            <span class="text-gray-400">O:</span><span class="${colorClass}">${priceFormatter.format(open)}</span>
+                                            <span class="text-gray-400">H:</span><span class="${colorClass}">${priceFormatter.format(high)}</span>
+                                            <span class="text-gray-400">L:</span><span class="${colorClass}">${priceFormatter.format(low)}</span>
+                                            <span class="text-gray-400">C:</span><span class="${colorClass}">${priceFormatter.format(close)}</span>
+                                            <span class="text-xs text-gray-400 ml-1 border-l-2 border-gray-400 block pl-2">${formattedTime} ${current_tz}</span>
+                                            ${markerInfo}
+                                        </div>
+                                        
+                                    `;
+                                } else {
+                                    ohlcDisplayElement.classList.add('hidden');
+                                }
+                            } else {
+                                ohlcDisplayElement.classList.add('hidden');
+                            }
+                        });
+
+
+                        // Handle responsive resizing
+                        const resizeObserver = new ResizeObserver(entries => {
+                            // Check if the actual chart wrapper is being resized
+                            const chartWrapper = chartContainer.value.querySelector('#lightweight-chart-wrapper');
+                            if (chart && chartWrapper) {
+                                const { width, height } = chartWrapper.contentRect || { width: chartWrapper.clientWidth, height: chartWrapper.clientHeight };
+                                chart.applyOptions({ width, height });
+                            }
+                        });
+                        resizeObserver.observe(chartContainer.value);
+
+                    } catch (e) {
+                        console.error("Error creating chart series:", e);
+                    }
+
+                    initialized.value = true;
+                };
+
+                // --- Vue Lifecycle Hooks ---
+                onMounted(() => {
+                    initializeChart();
+                    fetchStrategies();
+                });
+
+                onUnmounted(() => {
+                    if (chart) {
+                        chart.remove();
+                    }
+                    stopDataPolling(); // Ensure the timer is cleared on unmount
+                });
+
+                // --- Watchers ---
+                /*
+                watch(selectedStrategy, (newStrategyId) => {
+                    if (newStrategyId) {
+                        isLoading.value = true;
+                        // Initial load is always a full refresh (appendMode: false)
+                        fetchSignals(newStrategyId, false);
+                    } else {
+                        // If selectedStrategy becomes null (e.g., after switching mode and no strategies are found)
+                        resetChartAndData();
+                    }
+                });
+
+                watch(isMock, () => {
+                    isLoading.value = true;
+                    errorMessage.value = "";
+
+                    // FIX: Immediately reset chart on mode switch to clear all markers and data
+                    resetChartAndData();
+                    // Then, fetch strategies for the new mode, which will trigger data loading via the selectedStrategy watcher
+                    fetchStrategies();
+                });
+                */
+                watch(selectedStrategy, (newStrategyId) => {
+                    // Start the full backfill and polling cycle when strategy changes
+                    backfillDataAndStartPolling(newStrategyId);
+                });
+
+                watch(isMock, () => {
+                    // Stop polling, reset data, and refetch strategies when mode changes
+                    stopDataPolling();
+                    resetChartAndData();
+                    fetchStrategies();
+                });
+
+                return {
+                    chartContainer,
+                    initialized,
+                    lastUpdate,
+                    isLoading,
+                    isFetchingList,
+                    isFetchingSignals,
+                    isPollingActive,
+                    strategyNames,
+                    selectedStrategy,
+                    fetchSignals,
+                    fetchStrategies,
+                    backfillDataAndStartPolling,
+                    currentDataCount,
+                    isMock,
+                    isCrosshairActive,
+                    toggleVisibility,
+                    isCandleVisible,
+                    isFastEmaVisible,
+                    isSlowEmaVisible,
+                    BASE_URL,
+                    errorMessage,
+                    ohlcDisplay,
+                };
+            }
+        };
+
+        // Mount the Vue app
+        createApp(App).mount('#app');
+    </script>
+
+</body>
+
+</html>

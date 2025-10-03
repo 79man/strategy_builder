@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from typing import List, Any
+from enum import Enum
 
 import strategy_base
 import schema.strategy_schema as strategy_schema
@@ -35,6 +37,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Strategy API", lifespan=lifespan)
 
+import os
+
+static_dir = "static"
+if os.path.isdir(static_dir):
+    app.mount("/frontend", StaticFiles(directory=static_dir, html=True), name="static")
+else:
+    logger.warning(f"Static directory '{static_dir}' does not exist. Static files will not be served.")
 
 @app.post("/strategies")
 def create_strategy_instance(req: strategy_schema.CreateStrategyRequest):
@@ -64,6 +73,7 @@ def create_strategy_instance(req: strategy_schema.CreateStrategyRequest):
                 # initialize ticker-specific data instead of whole strategy
                 instance.initialize_ticker(ticker, interval, req.params)
 
+        instance.save_to_disk()  # Save initial state
         # Save instance to registry
         strategy_base.add_strategy_instance(
             instance=instance
@@ -95,7 +105,7 @@ def list_available_strategies():
     return {"available_strategies": strategy_base.list_strategy_classes()}
 
 
-@app.get("/strategies/instances", response_model=dict)
+@app.get("/strategies/instances", response_model=List[strategy_schema.StrategyDetails])
 def list_strategy_instances():
     if not reload_complete:
         raise HTTPException(
@@ -103,7 +113,7 @@ def list_strategy_instances():
             detail=f"Reloading in progress. Please try after sometime"
         )
 
-    return {"active_strategies": strategy_base.list_strategy_instances()}
+    return strategy_base.list_strategy_instances()
 
 
 @app.post(
@@ -113,7 +123,7 @@ def list_strategy_instances():
 def feed_candle(
     ticker: str,
     interval: str,
-    candle: strategy_schema.CandleRequest
+    candle: strategy_schema.CandleFeedRequest
 ):
     """
     Feed a new candle to all strategies that have this ticker+interval.
@@ -140,15 +150,17 @@ def feed_candle(
     errors = []
     for instance in instances:
         try:
-            result = instance.on_new_candle(
-                ticker=ticker, interval=interval, ohlc=candle.model_dump())
+            result = instance.on_new_candles(
+                ticker=ticker, interval=interval,
+                ohlc_list=[candle]
+            )
             # Check if strategy returned an error
 
             if isinstance(result, dict) and "error" in result:
                 errors.append(f"{instance.strategy_id}: {result['error']}")
                 continue
 
-            signal = instance.get_last_signal(ticker=ticker, interval=interval)
+            signal = instance.get_last_signal()
             responses.append(signal)
         except Exception as e:
             logger.error(
@@ -165,10 +177,10 @@ def feed_candle(
 
 
 @app.get(
-    "/strategies/{strategy_id}/{ticker}/{interval}/last-signal",
+    "/strategies/{strategy_id}/last-signal",
     response_model=strategy_schema.SignalResponse
 )
-def get_last_signal(strategy_id: str, ticker: str, interval: str):
+def get_last_signal(strategy_id: str):
     if not reload_complete:
         raise HTTPException(
             status_code=503,
@@ -178,20 +190,24 @@ def get_last_signal(strategy_id: str, ticker: str, interval: str):
     if not inst:
         raise HTTPException(
             status_code=404, detail="Strategy instance not found")
-    return inst.get_last_signal(ticker, interval)
+    return inst.get_last_signal()
 
+
+class SignalTypeEnum(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
 
 @app.get(
-    "/strategies/{strategy_id}/{ticker}/{interval}/signals",
+    "/strategies/{strategy_id}/signals",
     response_model=List[strategy_schema.SignalResponse]
 )
 def get_all_signals(
     strategy_id: str,
-    ticker: str,
-    interval: str,
     offset: int = Query(0, ge=0, description="Number of records to skip"),
-    limit: int = Query(100, ge=1, le=1000,
+    limit: int = Query(None, ge=1, le=1000,
                        description="Number of records to return"),
+    type: SignalTypeEnum = Query(None, description="Type of Signal (BUY/SELL/HOLD)")
 ):
     if not reload_complete:
         raise HTTPException(
@@ -203,7 +219,7 @@ def get_all_signals(
     if not inst:
         raise HTTPException(
             status_code=404, detail="Strategy instance not found")
-    return inst.get_all_signals(ticker, interval, offset=offset, limit=limit)
+    return inst.get_all_signals(offset=offset, limit=limit, type=type)
 
 
 @app.delete("/strategies/{strategy_id}")

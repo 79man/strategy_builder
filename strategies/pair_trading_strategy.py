@@ -83,7 +83,7 @@ class PairTradingStrategy(Strategy):
         self._tickers[(ticker, interval)] = df
         self.save_to_disk(ticker, interval)
 
-    def _on_new_candle(self, ticker: str, interval: str, ohlc: dict) -> dict:
+    def _on_new_candles(self, ticker: str, interval: str, ohlc: dict) -> dict:
         """
         Ingest a new candle for one ticker.
         Signals are computed only when BOTH tickers have aligned timestamps.
