@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from typing import List, Any
+from enum import Enum
 
 import strategy_base
 import schema.strategy_schema as strategy_schema
@@ -35,6 +37,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Strategy API", lifespan=lifespan)
 
+import os
+
+static_dir = "static"
+if os.path.isdir(static_dir):
+    app.mount("/frontend", StaticFiles(directory=static_dir, html=True), name="static")
+else:
+    logger.warning(f"Static directory '{static_dir}' does not exist. Static files will not be served.")
 
 @app.post("/strategies")
 def create_strategy_instance(req: strategy_schema.CreateStrategyRequest):
@@ -64,6 +73,7 @@ def create_strategy_instance(req: strategy_schema.CreateStrategyRequest):
                 # initialize ticker-specific data instead of whole strategy
                 instance.initialize_ticker(ticker, interval, req.params)
 
+        instance.save_to_disk()  # Save initial state
         # Save instance to registry
         strategy_base.add_strategy_instance(
             instance=instance
@@ -95,7 +105,7 @@ def list_available_strategies():
     return {"available_strategies": strategy_base.list_strategy_classes()}
 
 
-@app.get("/strategies/instances", response_model=dict)
+@app.get("/strategies/instances", response_model=List[strategy_schema.StrategyDetails])
 def list_strategy_instances():
     if not reload_complete:
         raise HTTPException(
@@ -103,7 +113,7 @@ def list_strategy_instances():
             detail=f"Reloading in progress. Please try after sometime"
         )
 
-    return {"active_strategies": strategy_base.list_strategy_instances()}
+    return strategy_base.list_strategy_instances()
 
 
 @app.post(
@@ -113,7 +123,7 @@ def list_strategy_instances():
 def feed_candle(
     ticker: str,
     interval: str,
-    candle: strategy_schema.CandleRequest
+    candle: strategy_schema.CandleFeedRequest
 ):
     """
     Feed a new candle to all strategies that have this ticker+interval.
@@ -140,15 +150,17 @@ def feed_candle(
     errors = []
     for instance in instances:
         try:
-            result = instance.on_new_candle(
-                ticker=ticker, interval=interval, ohlc=candle.model_dump())
+            result = instance.on_new_candles(
+                ticker=ticker, interval=interval,
+                ohlc_list=[candle]
+            )
             # Check if strategy returned an error
 
             if isinstance(result, dict) and "error" in result:
                 errors.append(f"{instance.strategy_id}: {result['error']}")
                 continue
 
-            signal = instance.get_last_signal(ticker=ticker, interval=interval)
+            signal = instance.get_last_signal()
             responses.append(signal)
         except Exception as e:
             logger.error(
@@ -165,10 +177,10 @@ def feed_candle(
 
 
 @app.get(
-    "/strategies/{strategy_id}/{ticker}/{interval}/last-signal",
+    "/strategies/{strategy_id}/last-signal",
     response_model=strategy_schema.SignalResponse
 )
-def get_last_signal(strategy_id: str, ticker: str, interval: str):
+def get_last_signal(strategy_id: str):
     if not reload_complete:
         raise HTTPException(
             status_code=503,
@@ -178,20 +190,24 @@ def get_last_signal(strategy_id: str, ticker: str, interval: str):
     if not inst:
         raise HTTPException(
             status_code=404, detail="Strategy instance not found")
-    return inst.get_last_signal(ticker, interval)
+    return inst.get_last_signal()
 
+
+class SignalTypeEnum(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
 
 @app.get(
-    "/strategies/{strategy_id}/{ticker}/{interval}/signals",
+    "/strategies/{strategy_id}/signals",
     response_model=List[strategy_schema.SignalResponse]
 )
 def get_all_signals(
     strategy_id: str,
-    ticker: str,
-    interval: str,
     offset: int = Query(0, ge=0, description="Number of records to skip"),
-    limit: int = Query(100, ge=1, le=1000,
+    limit: int = Query(None, ge=1, le=1000,
                        description="Number of records to return"),
+    type: SignalTypeEnum = Query(None, description="Type of Signal (BUY/SELL/HOLD)")
 ):
     if not reload_complete:
         raise HTTPException(
@@ -203,7 +219,7 @@ def get_all_signals(
     if not inst:
         raise HTTPException(
             status_code=404, detail="Strategy instance not found")
-    return inst.get_all_signals(ticker, interval, offset=offset, limit=limit)
+    return inst.get_all_signals(offset=offset, limit=limit, type=type)
 
 
 @app.delete("/strategies/{strategy_id}")
@@ -262,7 +278,7 @@ def delete_strategy_ticker(strategy_id: str, ticker: str, interval: str):
 
 @app.put("/strategies/{strategy_id}/restart")
 def restart_strategy_instance(strategy_id: str):
-    logger.info(f"Received strategy_id: '{strategy_id}'") 
+    logger.info(f"Received strategy_id: '{strategy_id}'")
     """
     Delete the full strategy instance and all its tickers/intervals.
     """
@@ -278,16 +294,130 @@ def restart_strategy_instance(strategy_id: str):
             status_code=404, detail="Strategy Instance not found")
 
     try:
-        if hasattr(instance, 'rehydrate'):
-            instance.rehydrate(None)
-        # strategy_base.remove_strategy_instance(instance)
-        return {
-            "message": f"Strategy {strategy_id} restarted",
-            "strategy_id": instance.strategy_id,
-            "status": instance.get_status()
-        }
-    
+        success, message = instance.restart()
+        if success:
+            return {
+                "message": message,
+                "strategy_id": strategy_id,
+                "status": instance.get_status()
+            }
+        else:
+            raise HTTPException(
+                status_code=403, detail=message
+            )
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Error in rehydrating: {e}")
         raise HTTPException(
             status_code=500, detail=f"Error in rehydrating: {e}")
+
+
+@app.put(
+    "/strategies/pause",
+    response_model=strategy_schema.StrategiesPauseResponse
+)
+def pause_strategy_instances(req: strategy_schema.StrategiesPauseRequest):
+    """
+    Resume the strategy instance
+    """
+    if not reload_complete:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Reloading in progress. Please try after sometime"
+        )
+
+    response = []
+    strategy_ids_to_pause = req.strategy_ids or []
+    if not strategy_ids_to_pause:
+        return {
+            'message': "No Strategy Ids specified"
+        }
+
+    for strategy_id in strategy_ids_to_pause:
+        instance = strategy_base.get_strategy_instance_by_id(strategy_id)
+        if not instance:
+            # raise HTTPException(
+            #     status_code=404, detail="Strategy Instance not found")
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status="Strategy Instance not found"
+                )
+            )
+            continue
+
+        try:
+            success, message = instance.pause()
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=instance.get_status() if success else message
+                )
+            )
+        except Exception as e:
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=f"{e}"
+                )
+            )
+    return {
+        'message': "Success",
+        'detail': response
+    }
+
+
+@app.put(
+    "/strategies/resume",
+    response_model=strategy_schema.StrategiesResumeResponse
+)
+def resume_strategy_instances(req: strategy_schema.StrategiesResumeRequest):
+    """
+    Resume the strategy instance
+    """
+    if not reload_complete:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Reloading in progress. Please try after sometime"
+        )
+
+    response = []
+    strategy_ids_to_resume = req.strategy_ids or []
+    if not strategy_ids_to_resume:
+        return {
+            'message': "No Strategy Ids specified"
+        }
+
+    for strategy_id in strategy_ids_to_resume:
+        instance = strategy_base.get_strategy_instance_by_id(strategy_id)
+        if not instance:
+            # raise HTTPException(
+            #     status_code=404, detail="Strategy Instance not found")
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status="Strategy Instance not found"
+                )
+            )
+            continue
+
+        try:
+            success, message = instance.resume()
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=instance.get_status() if success else message
+                )
+            )
+        except Exception as e:
+            response.append(
+                strategy_schema.StrategyWithStatus(
+                    strategy_id=strategy_id,
+                    status=f"{e}"
+                )
+            )
+    return {
+        'message': "Success",
+        'detail': response
+    }

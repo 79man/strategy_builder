@@ -29,3 +29,8 @@ def get_interval_timedelta(interval: str) -> timedelta:
     """Get timedelta for a given interval string"""
     validate_interval(interval)
     return _INTERVAL_MAP[interval]
+
+def get_interval_freq(interval_str: str):
+    validate_interval(interval_str)
+    return (_INTERVAL_MAP[interval_str]).total_seconds()
+

@@ -28,6 +28,8 @@ class LocalTickerDataSource(DataSource):
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV data from the external data feed service.
+        Columns names will be mapped to expected names for startegy builder
+        incoming Df will be sorted by datetime ascending
         If callback_url is provided, it can also be registered for live updates.
         """
 
@@ -111,14 +113,10 @@ class LocalTickerDataSource(DataSource):
                     df["datetime"], utc=True, format="mixed")
                 df.set_index("datetime", inplace=True)
 
-                required_cols = ["Open", "High", "Low", "Close"]
-                missing_cols = [
-                    col for col in required_cols if col not in df.columns]
-                if missing_cols:
-                    raise DataSourceError(
-                        f"Response missing required columns: {missing_cols}")
+                # Sort by datetime ascending
+                df.sort_index(inplace=True)
 
-                return df[required_cols].dropna()
+                return df
 
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")

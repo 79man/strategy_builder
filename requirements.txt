@@ -3,3 +3,5 @@ pandas
 uvicorn
 python-dotenv
 pydantic-settings
+lightweight-charts
+pandas-ta
